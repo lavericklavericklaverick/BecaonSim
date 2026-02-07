@@ -129,7 +129,7 @@ const App: React.FC = () => {
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [optResults, setOptResults] = useState<OptResult[]>([]);
   const [showTarget, setShowTarget] = useState(false);
-  const [autoScale, setAutoScale] = useState(false);
+  const [autoScale, setAutoScale] = useState(true);
 
   const [topGrid, setTopGrid] = useState<GridData | null>(null);
   const [sideGrid, setSideGrid] = useState<GridData | null>(null);

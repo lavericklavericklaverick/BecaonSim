@@ -1,45 +1,72 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# LED Visibility Simulator
 
-# Run and deploy your AI Studio app
+An advanced web-based simulator for visualizing the photometric propagation of LED arrays in dark environments. This application helps engineers and designers estimate realistic visibility distances by accounting for scotopic vision, beam patterns, and atmospheric attenuation.
 
-This contains everything you need to run your app locally.
+## 🌟 Key Features
 
-View your app in AI Studio: https://ai.studio/apps/drive/14r8LAx1VWWMHJWbx87LSwKP8x_wXbbRa
+*   **Advanced Photometry Engine:**
+    *   **Dual Efficiency Models:** Uses both **CIE 1951 Scotopic** (rod-mediated) and **CIE 1924 Photopic** (cone-mediated) luminous efficiency functions.
+    *   **Wavelength Sensitivity:** Accurately models the human eye's increased sensitivity to blue/green wavelengths in low-light conditions.
+    *   **Atmospheric Attenuation:** Simulates light loss over distance due to atmospheric conditions.
 
-## Run Locally
+*   **Interactive Visualization:**
+    *   **2D Heatmaps:** Analyze illuminance distribution with top-down and side-view heatmaps.
+    *   **3D Visualization:** Explore the full 3D beam pattern interactively using Three.js.
+    *   **Real-time Controls:** Adjust LED parameters (intensity, wavelength, beam angle) and visualize changes instantly.
+    *   **Auto-scaling:** Automatically adjusts the view to fit the calculated visibility range.
 
-**Prerequisites:**  Node.js
+*   **Engineering Utilities:**
+    *   **DXF Export:** Generate and download precise visibility boundary contours as DXF files for CAD integration.
+    *   **Detailed Metrics:** Real-time feedback on max visibility distance, beam width, and efficiency factors.
 
+## 🚀 Getting Started
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+### Prerequisites
 
-## GitHub Pages
+*   [Node.js](https://nodejs.org/) (v16 or higher recommended)
+*   npm (included with Node.js)
 
-Build the site for GitHub Pages (output will be placed in the `docs/` folder):
+### Installation
 
-1. Install deps and build:
+1.  Clone the repository:
+    ```bash
+    git clone https://github.com/lavericklavericklaverick/BecaonSim.git
+    cd BecaonSim
+    ```
 
-   ```bash
-   npm install
-   npm run build:gh-pages
-   ```
+2.  Install dependencies:
+    ```bash
+    npm install
+    ```
 
-2. Commit and push the `docs/` folder to the `main` branch.
+### Running Locally
 
-3. In your repository settings on GitHub, enable GitHub Pages and set the source to the `docs/` folder on the `main` branch.
-
-The site will be served at: `https://<your-username>.github.io/BecaonSim/`
-
-Alternatively you can use the provided `deploy` script which builds and publishes using `gh-pages`:
+Start the development server:
 
 ```bash
-npm run deploy
+npm run dev
 ```
 
-This will build the site and publish the output to the `gh-pages` branch.
+Open your browser and navigate to `http://localhost:5173/BecaonSim/` (or the URL provided in the terminal).
+
+### Building for Production
+
+To create a production build:
+
+```bash
+npm run build
+```
+
+The output will be generated in the `docs/` directory, ready for deployment.
+
+## 🛠️ Technology Stack
+
+*   **Frontend Framework:** React (with TypeScript)
+*   **Styling:** Tailwind CSS v4
+*   **3D Graphics:** Three.js / @react-three/fiber
+*   **Data Visualization:** D3.js
+*   **Build Tool:** Vite
+
+## 📄 License
+
+This project is open source.
