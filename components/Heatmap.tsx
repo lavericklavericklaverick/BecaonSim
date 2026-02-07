@@ -20,7 +20,8 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
   const [pulse, setPulse] = useState(1);
 
   const colorScale = useMemo(() => {
-    return scaleSequential(interpolateMagma).domain([-9, 0]);
+    // Clamp is essential to ensure values below the domain don't return undefined/black colors inappropriately
+    return scaleSequential(interpolateMagma).domain([-9, 0]).clamp(true);
   }, []);
 
   useEffect(() => {
@@ -49,9 +50,9 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Define margins for axes and title to prevent overlap
-    const marginLeft = 70; // Increased margin for larger fonts
-    const marginBottom = 60; // Increased margin for larger fonts
+    // Define margins
+    const marginLeft = 70;
+    const marginBottom = 60;
     const marginTop = 50; 
     const marginRight = 30;
 
@@ -62,10 +63,12 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     // 1. Prepare Image Data (Off-screen)
+    // We create a temporary canvas that holds the raw heatmap data pixel-for-pixel
     const imgData = ctx.createImageData(width, height);
     for (let i = 0; i < data.length; i++) {
       const val = data[i];
-      const logVal = val <= 0 ? -12 : Math.log10(val);
+      // Safely handle zero or negative values for log scale
+      const logVal = val <= 1e-15 ? -15 : Math.log10(val);
       const color = rgb(colorScale(logVal));
       
       const pxIdx = i * 4;
@@ -80,7 +83,7 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
     tempCanvas.height = height;
     tempCanvas.getContext('2d')?.putImageData(imgData, 0, 0);
 
-    // 2. Draw Image with View Transformation into the Drawing Area
+    // 2. Draw Image with View Transformation
     ctx.save();
     
     // Clip to drawing area
@@ -88,65 +91,66 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
     ctx.rect(marginLeft, marginTop, drawWidth, drawHeight);
     ctx.clip();
 
-    // Translate to drawing area origin
+    // Move origin to top-left of drawing area
     ctx.translate(marginLeft, marginTop);
 
+    // Explicitly disable smoothing for crisp grid rendering if resolution is low
+    ctx.imageSmoothingEnabled = false;
+
     if (viewType === 'side') {
-        // Rotate 90 deg Clockwise: Transpose Coordinates
-        // Grid X (Height) becomes Screen Y (Down)
-        // Grid Y (Distance) becomes Screen X (Right)
-        // Transformation: Input(x,y) -> Output(y,x)
-        // x' = 0*x + 1*y = y
-        // y' = 1*x + 0*y = x
-        ctx.transform(0, 1, 1, 0, 0, 0);
+        // Side View (Transposed):
+        // Grid Data: Cols = Distance (Y), Rows = Height (X)
+        // We want Screen X = Distance, Screen Y = Height
+        // The grid data index mapping inherently matches this if we transpose (swap X/Y).
+        // Transform: x' = y, y' = x
+        ctx.transform(0, 1, 1, 0, 0, 0); 
         
-        // We need to scale the transformed output to fit drawWidth/drawHeight.
-        // Image Y (Distance) -> Screen X (Width). Scale factor = drawWidth / height
-        // Image X (Height)   -> Screen Y (Height). Scale factor = drawHeight / width
-        // NOTE: ctx.scale applies to the coordinates before transform if called after? 
-        // No, current matrix = T. New matrix = T * S.
-        // Point P -> T * S * P.
-        // S * P = (x*sx, y*sy).
-        // T * (S*P) = (y*sy, x*sx).
-        // We want (y*sy) to be Width. So sy = drawWidth/height.
-        // We want (x*sx) to be Height. So sx = drawHeight/width.
-        
-        ctx.scale(drawHeight / width, drawWidth / height);
-        
+        // Scale to fit: 
+        // Transformed width is 'height' (number of rows), transformed height is 'width' (number of cols)
+        ctx.scale(drawWidth / height, drawHeight / width);
         ctx.drawImage(tempCanvas, 0, 0);
+
     } else {
-        // Standard Top View: Flip Y
-        // Grid X (Lateral) -> Screen X
-        // Grid Y (Distance) -> Screen Y (Inverted)
+        // Top View (Standard):
+        // Grid Data: Cols = Lateral (X), Rows = Distance (Y)
+        // Image Row 0 is minY (Distance 0). Image Row H is maxY (Distance Max).
+        // We want Distance 0 at the BOTTOM of the screen.
+        // So we need to flip the Y axis.
         
+        // Translate to bottom of draw area
+        ctx.translate(0, drawHeight);
+        // Scale Y by -1 to flip upwards
         ctx.scale(drawWidth / width, -drawHeight / height);
-        ctx.translate(0, -height);
         ctx.drawImage(tempCanvas, 0, 0);
     }
     ctx.restore();
 
     // 3. Coordinate Mapping Function
     // Maps World Coordinates (Grid Units) to Canvas Coordinates (Pixels) relative to full canvas
+    // This MUST match the transformation logic above.
     const mapToCanvas = (gx: number, gy: number) => {
         let sx, sy;
         if (viewType === 'side') {
-             // Side View (Rotated):
-             // gx = Height (World Z), gy = Distance (World Y)
-             // Screen X = Distance (0 to Max)
-             // Screen Y = Height (Min to Max) -> Downwards (Grid logic maps minX to top of screen in this transform)
+             // Side View:
+             // gx = Height (World X/Z), gy = Distance (World Y)
              
-             // X axis is Distance (gy)
+             // Screen X = Distance (0 to Max)
              sx = marginLeft + ((gy - minY) / (maxY - minY)) * drawWidth;
              
-             // Y axis is Height (gx)
+             // Screen Y = Height (Min to Max). 
+             // Note: In GridData, minX is index 0. In Side view transform, index 0 is at top (0).
+             // So Height increases DOWNWARDS in the canvas image draw.
              sy = marginTop + ((gx - minX) / (maxX - minX)) * drawHeight;
 
         } else {
              // Top View:
              // gx = Lateral (World X), gy = Distance (World Y)
+             
              // Screen X = Lateral
              sx = marginLeft + ((gx - minX) / (maxX - minX)) * drawWidth;
+             
              // Screen Y = Distance (Inverted)
+             // We flipped the image so minY is at bottom.
              sy = marginTop + drawHeight - ((gy - minY) / (maxY - minY)) * drawHeight;
         }
         return { x: sx, y: sy };
@@ -160,7 +164,7 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
     ctx.lineWidth = 1;
     
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.font = 'bold 16px monospace'; // Increased Font Size
+    ctx.font = 'bold 16px monospace';
     ctx.shadowColor = 'rgba(0,0,0,0.8)';
     ctx.shadowBlur = 4;
 
@@ -174,7 +178,7 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
           const p2 = mapToCanvas(x, maxY); // Height x, Dist max
           
           ctx.beginPath();
-          ctx.moveTo(marginLeft, p1.y); // Clamp to margin
+          ctx.moveTo(marginLeft, p1.y); 
           ctx.lineTo(marginLeft + drawWidth, p2.y);
           ctx.stroke();
 
@@ -333,8 +337,6 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
     ctx.lineCap = 'round';
 
     ledConfig.forEach(({ h, v }) => {
-      let projX, projY; 
-
       // 3D Direction Vector
       const dx = Math.sin(h) * Math.cos(v); // Lateral
       const dy = Math.cos(h) * Math.cos(v); // Forward
