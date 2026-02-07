@@ -6,6 +6,6 @@ export default defineConfig({
   plugins: [react()],
   base: '/BecaonSim/',
   build: {
-    outDir: 'dist',
+    outDir: 'docs',
   }
 })

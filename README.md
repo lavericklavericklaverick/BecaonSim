@@ -18,3 +18,20 @@ View your app in AI Studio: https://ai.studio/apps/drive/14r8LAx1VWWMHJWbx87LSwK
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+## GitHub Pages
+
+Build the site for GitHub Pages (output will be placed in the `docs/` folder):
+
+1. Install deps and build:
+
+   ```bash
+   npm install
+   npm run build:gh-pages
+   ```
+
+2. Commit and push the `docs/` folder to the `main` branch.
+
+3. In your repository settings on GitHub, enable GitHub Pages and set the source to the `docs/` folder on the `main` branch.
+
+The site will be served at: `https://<your-username>.github.io/BecaonSim/`

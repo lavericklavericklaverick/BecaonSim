@@ -1,4 +1,3 @@
-
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { SimulationParams, GridData, ColorPreset, BeamPoint, Point, Point3D } from './types';
 import { GRID_RES, COLOR_PRESETS, DEFAULT_BEAM_PATTERN, DEFAULT_GRID_LIMITS } from './constants';
@@ -106,7 +105,7 @@ const generateLedConfig = (ledCount: number, spreadAngle: number, rowCount: numb
 interface OptResult {
   h: number;
   v: number;
-  vol: number;
+  vol: number; // Represents Coverage %
   w: number;
   hDim: number;
   r: number;
@@ -412,8 +411,30 @@ const App: React.FC = () => {
     await new Promise(r => setTimeout(r, 50));
 
     const threshold = params.isFlashing ? Math.pow(10, params.logThreshold) / 8 : Math.pow(10, params.logThreshold);
+    const targetW = optTargets.width;
+    const targetH = optTargets.height;
+    const targetR = optTargets.range;
+
+    // Generate sampling points (First quadrant symmetry)
+    // We check points inside [0, W/2] x [0, H/2] x [0, R]
+    const samples: Point3D[] = [];
+    const stepX = 4; // 5 steps: 0, 25%, 50%, 75%, 100% of half-width
+    const stepZ = 4; // 5 steps
+    const stepY = 8; // 8 steps along range
     
-    // Optimization Helper: Binary search to find extent of beam in a specific direction
+    for(let i=0; i<=stepX; i++) {
+        const x = (i/stepX) * (targetW/2);
+        for(let k=0; k<=stepZ; k++) {
+            const z = (k/stepZ) * (targetH/2);
+            for(let j=1; j<=stepY; j++) {
+                const y = (j/stepY) * targetR;
+                samples.push({x, y, z});
+            }
+        }
+    }
+    const maxHits = samples.length;
+
+    // Helper: Binary search to find extent of beam in a specific direction (for reporting stats)
     const findExtent = (
         cfg: {h:number, v:number}[], 
         startP: Point3D, 
@@ -424,7 +445,7 @@ const App: React.FC = () => {
         let high = maxDist;
         let limit = 0;
         
-        for(let i=0; i<16; i++) { 
+        for(let i=0; i<12; i++) { // Reduced iterations for speed
             const mid = (low + high) / 2;
             const x = startP.x + dir.x * mid;
             const y = startP.y + dir.y * mid;
@@ -446,35 +467,47 @@ const App: React.FC = () => {
     };
 
     const validResults: OptResult[] = [];
-    const step = 2; 
+    const step = 2; // Coarse step for spread angles
     
     for (let h = 0; h <= 80; h += step) {
         for (let v = 0; v <= 80; v += step) {
              const cfg = generateLedConfig(params.ledCount, h, params.rowCount, v);
              
-             // 1. Find Max Range (Y) along center line
-             const range = findExtent(cfg, {x:0, y:0, z:0}, {x:0, y:1, z:0}, 50000);
-             if (range < 1) continue;
+             // 1. Calculate Coverage Score (Max Volume Inside Box)
+             let hits = 0;
+             for(const p of samples) {
+                 let total = 0;
+                 for (const c of cfg) {
+                    total += calculateIlluminance(p.x, p.y, p.z, c.h, c.v, params.peakCandela, effectiveEfficiency, params.beamPattern);
+                 }
+                 if (total >= threshold) hits++;
+             }
+             
+             const coverage = (hits / maxHits) * 100;
 
-             // 2. Find Width (X) at mid-range (Lateral)
-             const halfWidth = findExtent(cfg, {x:0, y:range * 0.5, z:0}, {x:1, y:0, z:0}, 20000);
-             const width = halfWidth * 2;
+             // 2. Filter low coverage results to keep list clean
+             if (coverage > 2) { // at least 2% coverage
+                 // 3. Calculate actual stats for display info
+                 // Max Range (Y)
+                 const range = findExtent(cfg, {x:0, y:0, z:0}, {x:0, y:1, z:0}, targetR * 2);
+                 // Width at mid-range
+                 const halfWidth = findExtent(cfg, {x:0, y:range * 0.5, z:0}, {x:1, y:0, z:0}, targetW * 2);
+                 const halfHeight = findExtent(cfg, {x:0, y:range * 0.5, z:0}, {x:0, y:0, z:1}, targetH * 2);
 
-             // 3. Find Height (Z) at mid-range (Elevation)
-             const halfHeight = findExtent(cfg, {x:0, y:range * 0.5, z:0}, {x:0, y:0, z:1}, 20000);
-             const height = halfHeight * 2;
-
-             // 4. Check Constraints
-             if (width >= optTargets.width && height >= optTargets.height && range >= optTargets.range) {
-                 const vol = width * height * range;
-                 validResults.push({ h, v, vol, w: width, hDim: height, r: range });
+                 validResults.push({ 
+                    h, v, 
+                    vol: coverage, 
+                    w: halfWidth * 2, 
+                    hDim: halfHeight * 2, 
+                    r: range 
+                 });
              }
         }
     }
     
-    // Sort by volume descending
+    // Sort by coverage descending
     validResults.sort((a, b) => b.vol - a.vol);
-    setOptResults(validResults);
+    setOptResults(validResults.slice(0, 100)); // Limit to top 100
     setIsOptimizing(false);
     setShowTarget(true); // Enable target view on finish
 
@@ -563,13 +596,13 @@ const App: React.FC = () => {
               <div className="space-y-6 py-2">
                 <div className="bg-white/5 rounded-xl p-3 mb-2">
                     <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest block mb-4">Plan (Horizontal)</span>
-                    <ControlSlider label="LED Columns" val={params.ledCount} min={1} max={20} step={1} onChange={v => updateParam('ledCount', v)} />
+                    <ControlSlider label="LED Columns" val={params.ledCount} min={1} max={8} step={1} onChange={v => updateParam('ledCount', v)} />
                     <ControlSlider label="Plan Spread" val={params.spreadAngle} unit="°" min={0} max={180} step={1} onChange={v => updateParam('spreadAngle', v)} />
                 </div>
                 
                 <div className="bg-white/5 rounded-xl p-3">
                     <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest block mb-4">Elevation (Vertical)</span>
-                    <ControlSlider label="LED Rows" val={params.rowCount} min={1} max={20} step={1} onChange={v => updateParam('rowCount', v)} />
+                    <ControlSlider label="LED Rows" val={params.rowCount} min={1} max={8} step={1} onChange={v => updateParam('rowCount', v)} />
                     <ControlSlider label="Elev Spread" val={params.verticalSpreadAngle} unit="°" min={0} max={180} step={1} onChange={v => updateParam('verticalSpreadAngle', v)} />
                 </div>
               </div>
@@ -579,11 +612,11 @@ const App: React.FC = () => {
             <CollapsibleSection title="Auto-Optimizer" icon="fa-magic" defaultOpen={false}>
               <div className="py-2 space-y-4">
                 <p className="text-[10px] text-gray-500 leading-relaxed">
-                   Calculates options (0-80°) matching min dimensions. Click row to apply.
+                   Maximizes volumetric coverage within the target dimensions.
                 </p>
                 <div className="grid grid-cols-3 gap-2">
                     <div className="bg-black/40 rounded-xl p-2 border border-white/5">
-                        <label className="text-[8px] font-bold text-gray-400 uppercase block mb-1">Min Width</label>
+                        <label className="text-[8px] font-bold text-gray-400 uppercase block mb-1">Target Width</label>
                         <div className="flex items-center gap-1">
                             <input 
                               type="number" 
@@ -595,7 +628,7 @@ const App: React.FC = () => {
                         </div>
                     </div>
                     <div className="bg-black/40 rounded-xl p-2 border border-white/5">
-                        <label className="text-[8px] font-bold text-gray-400 uppercase block mb-1">Min Height</label>
+                        <label className="text-[8px] font-bold text-gray-400 uppercase block mb-1">Target Height</label>
                         <div className="flex items-center gap-1">
                             <input 
                               type="number" 
@@ -607,7 +640,7 @@ const App: React.FC = () => {
                         </div>
                     </div>
                     <div className="bg-black/40 rounded-xl p-2 border border-white/5">
-                        <label className="text-[8px] font-bold text-gray-400 uppercase block mb-1">Min Range</label>
+                        <label className="text-[8px] font-bold text-gray-400 uppercase block mb-1">Target Range</label>
                         <div className="flex items-center gap-1">
                             <input 
                               type="number" 
@@ -655,7 +688,7 @@ const App: React.FC = () => {
                         <tr>
                           <th className="p-3">Spread</th>
                           <th className="p-3">Range</th>
-                          <th className="p-3">Vol (Gm³)</th>
+                          <th className="p-3">Coverage</th>
                           <th className="p-3 text-right">Set</th>
                         </tr>
                       </thead>
@@ -669,7 +702,7 @@ const App: React.FC = () => {
                                 </div>
                              </td>
                              <td className="p-3 font-mono text-gray-400">{(res.r/1000).toFixed(1)}km</td>
-                             <td className="p-3 font-mono text-emerald-400 font-bold">{(res.vol/1e9).toFixed(2)}</td>
+                             <td className="p-3 font-mono text-emerald-400 font-bold">{res.vol.toFixed(1)}%</td>
                              <td className="p-3 text-right">
                                 <button className="w-6 h-6 rounded-full bg-white/5 flex items-center justify-center group-hover/row:bg-indigo-500 transition-colors">
                                     <i className="fas fa-arrow-right text-[8px] text-gray-500 group-hover/row:text-white"></i>
@@ -682,7 +715,7 @@ const App: React.FC = () => {
                   </div>
                 ) : !isOptimizing && (
                    <div className="p-3 text-center text-[10px] text-gray-600 italic border border-white/5 rounded-xl border-dashed">
-                      No configurations found matching current constraints.
+                      No efficient configurations found.
                    </div>
                 )}
               </div>
