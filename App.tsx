@@ -7,6 +7,7 @@ import { marchSquares } from './utils/marchSquares';
 import { downloadDXF } from './utils/dxfExporter';
 import Heatmap from './components/Heatmap';
 import View3D from './components/View3D';
+import Instructions from './components/Instructions';
 
 /**
  * Interface for CollapsibleSection props
@@ -128,12 +129,14 @@ const App: React.FC = () => {
   const [optTargets, setOptTargets] = useState({ width: 1000, height: 600, range: 2000 });
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [optResults, setOptResults] = useState<OptResult[]>([]);
+  const [showTarget, setShowTarget] = useState(false);
+  const [autoScale, setAutoScale] = useState(false);
 
   const [topGrid, setTopGrid] = useState<GridData | null>(null);
   const [sideGrid, setSideGrid] = useState<GridData | null>(null);
   const [slices3D, setSlices3D] = useState<Point3D[][]>([]);
   const [isCalculating, setIsCalculating] = useState(false);
-  const [activeTab, setActiveTab] = useState<'2D' | '3D'>('2D');
+  const [activeTab, setActiveTab] = useState<'2D' | '3D' | 'HELP'>('2D');
 
   const effectiveEfficiency = useMemo(() => getEffectiveEfficiency(params.wavelength), [params.wavelength]);
   
@@ -293,6 +296,71 @@ const App: React.FC = () => {
     return () => clearTimeout(timer);
   }, [runSimulation]);
 
+  // AUTO SCALING EFFECT
+  useEffect(() => {
+    if (!autoScale || !topGrid || !sideGrid || isCalculating) return;
+
+    // Determine bounds of the threshold contour
+    const threshold = params.isFlashing ? Math.pow(10, params.logThreshold) / 8 : Math.pow(10, params.logThreshold);
+    
+    // Helper to find max extent in a grid
+    const getExtent = (grid: GridData) => {
+       let maxDim = 0;
+       let maxRange = 0;
+       for (let i = 0; i < grid.data.length; i++) {
+          if (grid.data[i] >= threshold) {
+             const gx = i % grid.width;
+             const gy = Math.floor(i / grid.width);
+             
+             // Convert to world
+             const wx = Math.abs(grid.minX + gx * ((grid.maxX - grid.minX) / (grid.width - 1)));
+             const wy = grid.minY + gy * ((grid.maxY - grid.minY) / (grid.height - 1));
+             
+             if (wx > maxDim) maxDim = wx;
+             if (wy > maxRange) maxRange = wy;
+          }
+       }
+       return { maxDim, maxRange };
+    };
+
+    const topExt = getExtent(topGrid);
+    const sideExt = getExtent(sideGrid);
+
+    const neededLat = Math.max(topExt.maxDim, sideExt.maxDim); // Height is Z, Lat is X. both symmetrical around 0.
+    const neededRange = Math.max(topExt.maxRange, sideExt.maxRange);
+
+    if (neededLat === 0 || neededRange === 0) return; // No light detected
+
+    const newMaxX = Math.ceil(neededLat * 1.3 / 100) * 100; // +30% padding
+    const newMaxY = Math.ceil(neededRange * 1.2 / 100) * 100; // +20% padding
+
+    // Only update if difference is significant to avoid loops (>10%)
+    const diffX = Math.abs(newMaxX - params.gridLimits.maxX) / params.gridLimits.maxX;
+    const diffY = Math.abs(newMaxY - params.gridLimits.maxY) / params.gridLimits.maxY;
+
+    if (diffX > 0.1 || diffY > 0.1) {
+       // Also ensure we don't zoom in to absurdly small levels
+       const clampedX = Math.max(200, newMaxX);
+       const clampedY = Math.max(200, newMaxY);
+
+       // Check if clamped is still different
+       if (Math.abs(clampedX - params.gridLimits.maxX) > 50 || Math.abs(clampedY - params.gridLimits.maxY) > 50) {
+           console.log("Auto-Scaling to:", clampedX, clampedY);
+           setParams(prev => ({
+             ...prev,
+             gridLimits: {
+               minX: -clampedX,
+               maxX: clampedX,
+               minY: 0,
+               maxY: clampedY
+             }
+           }));
+       }
+    }
+
+  }, [topGrid, sideGrid, autoScale, isCalculating, params.logThreshold, params.isFlashing, params.gridLimits.maxX, params.gridLimits.maxY]);
+
+
   const contourPathsTop = useMemo(() => {
     if (!topGrid) return [];
     const effectiveThreshold = params.isFlashing ? Math.pow(10, params.logThreshold) / 8 : Math.pow(10, params.logThreshold);
@@ -333,6 +401,7 @@ const App: React.FC = () => {
       spreadAngle: res.h,
       verticalSpreadAngle: res.v
     }));
+    setShowTarget(true); // Automatically show target when applying optimization
   };
 
   const handleOptimize = useCallback(async () => {
@@ -407,6 +476,7 @@ const App: React.FC = () => {
     validResults.sort((a, b) => b.vol - a.vol);
     setOptResults(validResults);
     setIsOptimizing(false);
+    setShowTarget(true); // Enable target view on finish
 
   }, [params.ledCount, params.rowCount, params.peakCandela, params.beamPattern, params.isFlashing, params.logThreshold, effectiveEfficiency, optTargets]);
 
@@ -431,6 +501,64 @@ const App: React.FC = () => {
         <aside className="lg:col-span-4 xl:col-span-3 space-y-4">
           <div className="bg-gray-900/50 border border-white/5 rounded-[2rem] p-4 shadow-2xl backdrop-blur-3xl space-y-2">
             
+            {/* 1. Optical Parameters (Datasheet mapping first) */}
+            <CollapsibleSection title="Optical Parameters" icon="fa-lightbulb" defaultOpen={true}>
+              <div className="space-y-6 py-2">
+                <ControlSlider label="Peak Intensity" val={params.peakCandela} unit=" cd" min={0} max={5} step={0.1} onChange={v => updateParam('peakCandela', v)} />
+                <ControlSlider label="Wavelength" val={params.wavelength} unit=" nm" min={380} max={700} step={5} onChange={v => updateParam('wavelength', v)} />
+                
+                <div className="pt-2">
+                  <label className="flex items-center justify-between cursor-pointer group">
+                    <span className="text-[11px] font-black text-gray-500 uppercase tracking-widest group-hover:text-white transition-colors">Temporal Mode</span>
+                    <div className="flex bg-black/40 p-1 rounded-xl border border-white/5">
+                      <button 
+                        onClick={() => updateParam('isFlashing', false)}
+                        className={`px-3 py-1.5 text-[9px] font-black uppercase tracking-widest rounded-lg transition-all ${!params.isFlashing ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'text-gray-500 hover:text-gray-300'}`}
+                      >Steady</button>
+                      <button 
+                        onClick={() => updateParam('isFlashing', true)}
+                        className={`px-3 py-1.5 text-[9px] font-black uppercase tracking-widest rounded-lg transition-all ${params.isFlashing ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' : 'text-gray-500 hover:text-gray-300'}`}
+                      >Flashing</button>
+                    </div>
+                  </label>
+                </div>
+
+                <div className="flex flex-wrap gap-2 mt-4">
+                  {COLOR_PRESETS.map((p) => (
+                    <button key={p.wavelength} onClick={() => updateParam('wavelength', p.wavelength)} 
+                      className={`w-7 h-7 rounded-lg border-2 transition-all ${params.wavelength === p.wavelength ? 'border-white scale-110 shadow-lg' : 'border-transparent opacity-40 hover:opacity-100'}`} 
+                      style={{ backgroundColor: p.hex }} title={p.name} />
+                  ))}
+                </div>
+              </div>
+            </CollapsibleSection>
+
+            {/* 2. Beam Pattern Table (Detailed datasheet mapping) */}
+            <CollapsibleSection title="Beam Pattern Table" icon="fa-chart-area" defaultOpen={false}>
+              <div className="py-2">
+                <div className="rounded-2xl border border-white/5 overflow-hidden bg-black/30">
+                  <table className="w-full text-[11px] text-left">
+                    <thead className="bg-white/5 text-gray-500 font-black uppercase tracking-widest">
+                      <tr><th className="px-4 py-3">Angle (°)</th><th className="px-4 py-3">Intensity</th></tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5 font-mono">
+                      {params.beamPattern.map((pt, i) => (
+                        <tr key={i} className="hover:bg-white/5 transition-colors">
+                          <td className="px-4 py-2">
+                            <input type="number" value={pt.angle} onChange={e => updateBeamPoint(i, 'angle', parseFloat(e.target.value))} className="bg-transparent w-full outline-none text-white" disabled={i===0} />
+                          </td>
+                          <td className="px-4 py-2">
+                            <input type="number" step="0.01" value={pt.intensity} onChange={e => updateBeamPoint(i, 'intensity', parseFloat(e.target.value))} className="bg-transparent w-full outline-none text-indigo-400" />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </CollapsibleSection>
+
+            {/* 3. Array Configuration (Geometry) */}
             <CollapsibleSection title="Array Configuration" icon="fa-th" defaultOpen={true}>
               <div className="space-y-6 py-2">
                 <div className="bg-white/5 rounded-xl p-3 mb-2">
@@ -447,7 +575,8 @@ const App: React.FC = () => {
               </div>
             </CollapsibleSection>
 
-            <CollapsibleSection title="Auto-Optimizer" icon="fa-magic" defaultOpen={true}>
+            {/* 4. Auto-Optimizer (Optimization) */}
+            <CollapsibleSection title="Auto-Optimizer" icon="fa-magic" defaultOpen={false}>
               <div className="py-2 space-y-4">
                 <p className="text-[10px] text-gray-500 leading-relaxed">
                    Calculates options (0-80°) matching min dimensions. Click row to apply.
@@ -490,23 +619,34 @@ const App: React.FC = () => {
                         </div>
                     </div>
                 </div>
-                <button 
-                  onClick={handleOptimize}
-                  disabled={isOptimizing}
-                  className="w-full py-3 bg-gradient-to-r from-violet-600 to-indigo-600 rounded-xl shadow-lg shadow-indigo-500/20 hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 group"
-                >
-                  {isOptimizing ? (
-                    <>
-                      <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                      <span className="text-[10px] font-black uppercase tracking-widest text-white">Scanning...</span>
-                    </>
-                  ) : (
-                    <>
-                      <i className="fas fa-search text-xs text-yellow-300 group-hover:animate-pulse"></i>
-                      <span className="text-[10px] font-black uppercase tracking-widest text-white">Find Options</span>
-                    </>
-                  )}
-                </button>
+                
+                <div className="flex items-center justify-between">
+                     <button 
+                      onClick={handleOptimize}
+                      disabled={isOptimizing}
+                      className="flex-1 py-3 bg-gradient-to-r from-violet-600 to-indigo-600 rounded-xl shadow-lg shadow-indigo-500/20 hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 group"
+                    >
+                      {isOptimizing ? (
+                        <>
+                          <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                          <span className="text-[10px] font-black uppercase tracking-widest text-white">Scanning...</span>
+                        </>
+                      ) : (
+                        <>
+                          <i className="fas fa-search text-xs text-yellow-300 group-hover:animate-pulse"></i>
+                          <span className="text-[10px] font-black uppercase tracking-widest text-white">Find Options</span>
+                        </>
+                      )}
+                    </button>
+                    
+                    <button 
+                        onClick={() => setShowTarget(!showTarget)}
+                        className={`ml-2 w-12 h-full rounded-xl flex items-center justify-center border transition-all ${showTarget ? 'bg-yellow-500/20 border-yellow-500 text-yellow-500' : 'bg-white/5 border-transparent text-gray-500 hover:text-white'}`}
+                        title="Toggle Target Box"
+                    >
+                        <i className="fas fa-vector-square"></i>
+                    </button>
+                </div>
                 
                 {optResults.length > 0 ? (
                   <div className="mt-2 bg-black/40 rounded-xl border border-white/5 overflow-hidden max-h-60 overflow-y-auto custom-scrollbar">
@@ -548,74 +688,29 @@ const App: React.FC = () => {
               </div>
             </CollapsibleSection>
 
-            <CollapsibleSection title="Optical Parameters" icon="fa-lightbulb" defaultOpen={false}>
-              <div className="space-y-6 py-2">
-                <ControlSlider label="Peak Intensity" val={params.peakCandela} unit=" cd" min={0} max={5} step={0.1} onChange={v => updateParam('peakCandela', v)} />
-                <ControlSlider label="Wavelength" val={params.wavelength} unit=" nm" min={380} max={700} step={5} onChange={v => updateParam('wavelength', v)} />
-                
-                <div className="pt-2">
-                  <label className="flex items-center justify-between cursor-pointer group">
-                    <span className="text-[11px] font-black text-gray-500 uppercase tracking-widest group-hover:text-white transition-colors">Temporal Mode</span>
-                    <div className="flex bg-black/40 p-1 rounded-xl border border-white/5">
-                      <button 
-                        onClick={() => updateParam('isFlashing', false)}
-                        className={`px-3 py-1.5 text-[9px] font-black uppercase tracking-widest rounded-lg transition-all ${!params.isFlashing ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'text-gray-500 hover:text-gray-300'}`}
-                      >Steady</button>
-                      <button 
-                        onClick={() => updateParam('isFlashing', true)}
-                        className={`px-3 py-1.5 text-[9px] font-black uppercase tracking-widest rounded-lg transition-all ${params.isFlashing ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' : 'text-gray-500 hover:text-gray-300'}`}
-                      >Flashing</button>
-                    </div>
-                  </label>
-                </div>
-
-                <div className="flex flex-wrap gap-2 mt-4">
-                  {COLOR_PRESETS.map((p) => (
-                    <button key={p.wavelength} onClick={() => updateParam('wavelength', p.wavelength)} 
-                      className={`w-7 h-7 rounded-lg border-2 transition-all ${params.wavelength === p.wavelength ? 'border-white scale-110 shadow-lg' : 'border-transparent opacity-40 hover:opacity-100'}`} 
-                      style={{ backgroundColor: p.hex }} title={p.name} />
-                  ))}
-                </div>
-              </div>
-            </CollapsibleSection>
-
-            <CollapsibleSection title="Beam Pattern Table" icon="fa-chart-area" defaultOpen={false}>
+            {/* 5. Detection Threshold (Physics) */}
+            <CollapsibleSection title="Detection Threshold" icon="fa-low-vision" defaultOpen={true}>
               <div className="py-2">
-                <div className="rounded-2xl border border-white/5 overflow-hidden bg-black/30">
-                  <table className="w-full text-[11px] text-left">
-                    <thead className="bg-white/5 text-gray-500 font-black uppercase tracking-widest">
-                      <tr><th className="px-4 py-3">Angle (°)</th><th className="px-4 py-3">Intensity</th></tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/5 font-mono">
-                      {params.beamPattern.map((pt, i) => (
-                        <tr key={i} className="hover:bg-white/5 transition-colors">
-                          <td className="px-4 py-2">
-                            <input type="number" value={pt.angle} onChange={e => updateBeamPoint(i, 'angle', parseFloat(e.target.value))} className="bg-transparent w-full outline-none text-white" disabled={i===0} />
-                          </td>
-                          <td className="px-4 py-2">
-                            <input type="number" step="0.01" value={pt.intensity} onChange={e => updateBeamPoint(i, 'intensity', parseFloat(e.target.value))} className="bg-transparent w-full outline-none text-indigo-400" />
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                 <ControlSlider label="Log₁₀ lx" val={params.logThreshold} min={-12} max={-2} step={0.1} onChange={v => updateParam('logThreshold', v)} color="accent-emerald-500" />
               </div>
             </CollapsibleSection>
 
+            {/* 6. View Limits (Visualization) */}
             <CollapsibleSection title="View Limits" icon="fa-expand-arrows-alt" defaultOpen={false}>
               <div className="space-y-6 py-2">
+                <div className="flex items-center justify-between bg-black/20 p-2 rounded-lg mb-4 border border-white/5">
+                   <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={autoScale} onChange={e => setAutoScale(e.target.checked)} className="accent-indigo-500 w-3 h-3" />
+                      Auto-Scale View
+                   </label>
+                   {autoScale && <span className="text-[9px] text-indigo-400 animate-pulse">Active</span>}
+                </div>
+                
                 <ControlSlider label="Lateral Range" val={params.gridLimits.maxX} unit="m" min={100} max={20000} step={100} onChange={v => {
                   updateGridLimit('maxX', v);
                   updateGridLimit('minX', -v);
                 }} />
                 <ControlSlider label="Forward Range" val={params.gridLimits.maxY} unit="m" min={100} max={20000} step={100} onChange={v => updateGridLimit('maxY', v)} />
-              </div>
-            </CollapsibleSection>
-
-            <CollapsibleSection title="Detection Threshold" icon="fa-low-vision" defaultOpen={true}>
-              <div className="py-2">
-                 <ControlSlider label="Log₁₀ lx" val={params.logThreshold} min={-12} max={-2} step={0.1} onChange={v => updateParam('logThreshold', v)} color="accent-emerald-500" />
               </div>
             </CollapsibleSection>
           </div>
@@ -638,6 +733,13 @@ const App: React.FC = () => {
                3D Isometric
                {activeTab === '3D' && <span className="absolute bottom-0 left-0 w-full h-0.5 bg-indigo-500 shadow-[0_0_10px_rgba(99,102,241,0.5)]"></span>}
              </button>
+             <button 
+               onClick={() => setActiveTab('HELP')} 
+               className={`pb-4 text-xs font-black uppercase tracking-[0.2em] transition-all relative ${activeTab === 'HELP' ? 'text-white' : 'text-gray-500 hover:text-gray-300'}`}
+             >
+               Instructions
+               {activeTab === 'HELP' && <span className="absolute bottom-0 left-0 w-full h-0.5 bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]"></span>}
+             </button>
           </div>
 
           {activeTab === '2D' && (
@@ -653,6 +755,7 @@ const App: React.FC = () => {
                     contourLines={contourPathsTop}
                     viewType="top"
                     title="TOP VIEW (PLAN)"
+                    targetBox={showTarget ? optTargets : undefined}
                   />
                 ) : (
                   <div className="w-full aspect-video flex flex-col items-center justify-center gap-6 text-gray-600 bg-gray-950 rounded-[2.5rem]">
@@ -690,6 +793,7 @@ const App: React.FC = () => {
                     contourLines={contourPathsSide}
                     viewType="side"
                     title="SIDE VIEW (ELEVATION)"
+                    targetBox={showTarget ? optTargets : undefined}
                   />
                 ) : (
                   <div className="w-full aspect-video flex flex-col items-center justify-center gap-6 text-gray-600 bg-gray-950 rounded-[2.5rem]">
@@ -707,9 +811,12 @@ const App: React.FC = () => {
                 isFlashing={params.isFlashing} 
                 maxDist={params.gridLimits.maxY} 
                 lateralSize={params.gridLimits.maxX}
+                targetBox={showTarget ? optTargets : undefined}
               />
             </div>
           )}
+
+          {activeTab === 'HELP' && <Instructions />}
 
           <div className="mt-8 flex items-center justify-between px-6 text-[10px] font-black uppercase tracking-[0.2em] text-gray-600">
              <div className="flex items-center gap-3">

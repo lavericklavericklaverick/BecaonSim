@@ -1,6 +1,5 @@
-
 import React, { useRef, useEffect, useMemo, useState } from 'react';
-import * as d3 from 'd3';
+import { scaleSequential, interpolateMagma, rgb } from 'd3';
 import { GridData, Point } from '../types';
 
 interface HeatmapProps {
@@ -11,16 +10,17 @@ interface HeatmapProps {
   contourLines: Point[][];
   viewType?: 'top' | 'side';
   title?: string;
+  targetBox?: { width: number; height: number; range: number };
 }
 
-const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashing, contourLines, viewType = 'top', title }) => {
+const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashing, contourLines, viewType = 'top', title, targetBox }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const { data, width, height, minX, maxX, minY, maxY } = grid;
   
   const [pulse, setPulse] = useState(1);
 
   const colorScale = useMemo(() => {
-    return d3.scaleSequential(d3.interpolateMagma).domain([-9, 0]);
+    return scaleSequential(interpolateMagma).domain([-9, 0]);
   }, []);
 
   useEffect(() => {
@@ -49,13 +49,24 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    // Define margins for axes and title to prevent overlap
+    const marginLeft = 70; // Increased margin for larger fonts
+    const marginBottom = 60; // Increased margin for larger fonts
+    const marginTop = 50; 
+    const marginRight = 30;
+
+    // Drawing area dimensions
+    const drawWidth = canvas.width - marginLeft - marginRight;
+    const drawHeight = canvas.height - marginTop - marginBottom;
+
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // 1. Prepare Image Data (Off-screen)
     const imgData = ctx.createImageData(width, height);
     for (let i = 0; i < data.length; i++) {
       const val = data[i];
       const logVal = val <= 0 ? -12 : Math.log10(val);
-      const color = d3.rgb(colorScale(logVal));
+      const color = rgb(colorScale(logVal));
       
       const pxIdx = i * 4;
       imgData.data[pxIdx] = color.r;
@@ -69,188 +80,328 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
     tempCanvas.height = height;
     tempCanvas.getContext('2d')?.putImageData(imgData, 0, 0);
 
+    // 2. Draw Image with View Transformation into the Drawing Area
     ctx.save();
-    ctx.scale(canvas.width / width, -canvas.height / height);
-    ctx.translate(0, -height);
-    ctx.drawImage(tempCanvas, 0, 0);
+    
+    // Clip to drawing area
+    ctx.beginPath();
+    ctx.rect(marginLeft, marginTop, drawWidth, drawHeight);
+    ctx.clip();
+
+    // Translate to drawing area origin
+    ctx.translate(marginLeft, marginTop);
+
+    if (viewType === 'side') {
+        // Rotate 90 deg Clockwise: Transpose Coordinates
+        // Grid X (Height) becomes Screen Y (Down)
+        // Grid Y (Distance) becomes Screen X (Right)
+        // Transformation: Input(x,y) -> Output(y,x)
+        // x' = 0*x + 1*y = y
+        // y' = 1*x + 0*y = x
+        ctx.transform(0, 1, 1, 0, 0, 0);
+        
+        // We need to scale the transformed output to fit drawWidth/drawHeight.
+        // Image Y (Distance) -> Screen X (Width). Scale factor = drawWidth / height
+        // Image X (Height)   -> Screen Y (Height). Scale factor = drawHeight / width
+        // NOTE: ctx.scale applies to the coordinates before transform if called after? 
+        // No, current matrix = T. New matrix = T * S.
+        // Point P -> T * S * P.
+        // S * P = (x*sx, y*sy).
+        // T * (S*P) = (y*sy, x*sx).
+        // We want (y*sy) to be Width. So sy = drawWidth/height.
+        // We want (x*sx) to be Height. So sx = drawHeight/width.
+        
+        ctx.scale(drawHeight / width, drawWidth / height);
+        
+        ctx.drawImage(tempCanvas, 0, 0);
+    } else {
+        // Standard Top View: Flip Y
+        // Grid X (Lateral) -> Screen X
+        // Grid Y (Distance) -> Screen Y (Inverted)
+        
+        ctx.scale(drawWidth / width, -drawHeight / height);
+        ctx.translate(0, -height);
+        ctx.drawImage(tempCanvas, 0, 0);
+    }
     ctx.restore();
 
-    const scaleX = (x: number) => ((x - minX) / (maxX - minX)) * canvas.width;
-    const scaleY = (y: number) => canvas.height - ((y - minY) / (maxY - minY)) * canvas.height;
+    // 3. Coordinate Mapping Function
+    // Maps World Coordinates (Grid Units) to Canvas Coordinates (Pixels) relative to full canvas
+    const mapToCanvas = (gx: number, gy: number) => {
+        let sx, sy;
+        if (viewType === 'side') {
+             // Side View (Rotated):
+             // gx = Height (World Z), gy = Distance (World Y)
+             // Screen X = Distance (0 to Max)
+             // Screen Y = Height (Min to Max) -> Downwards (Grid logic maps minX to top of screen in this transform)
+             
+             // X axis is Distance (gy)
+             sx = marginLeft + ((gy - minY) / (maxY - minY)) * drawWidth;
+             
+             // Y axis is Height (gx)
+             sy = marginTop + ((gx - minX) / (maxX - minX)) * drawHeight;
 
-    const rangeX = maxX - minX;
-    const rangeY = maxY - minY;
-    
-    const getStep = (range: number) => {
-      if (range > 20000) return 5000;
-      if (range > 10000) return 2000;
-      if (range > 5000) return 1000;
-      if (range > 2000) return 500;
-      if (range > 500) return 100;
-      return 50;
+        } else {
+             // Top View:
+             // gx = Lateral (World X), gy = Distance (World Y)
+             // Screen X = Lateral
+             sx = marginLeft + ((gx - minX) / (maxX - minX)) * drawWidth;
+             // Screen Y = Distance (Inverted)
+             sy = marginTop + drawHeight - ((gy - minY) / (maxY - minY)) * drawHeight;
+        }
+        return { x: sx, y: sy };
     };
 
-    const stepX = getStep(rangeX);
-    const stepY = getStep(rangeY);
+    const gridStep = 100;
+    const labelStep = 500;
 
-    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.setLineDash([4, 6]);
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1;
     
-    ctx.font = 'bold 24px monospace';
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.font = 'bold 16px monospace'; // Increased Font Size
     ctx.shadowColor = 'rgba(0,0,0,0.8)';
     ctx.shadowBlur = 4;
 
-    for (let x = Math.ceil(minX / stepX) * stepX; x <= maxX; x += stepX) {
-      const sx = scaleX(x);
-      ctx.beginPath();
-      ctx.moveTo(sx, 0);
-      ctx.lineTo(sx, canvas.height);
-      ctx.stroke();
-      if (Math.abs(x) > 1) {
-        ctx.fillText(`${x}m`, sx + 10, canvas.height - 15);
+    // DRAW GRID & TICKS
+    
+    // Vertical Lines (Constant World X / Lateral / Height)
+    for (let x = Math.ceil(minX / gridStep) * gridStep; x <= maxX; x += gridStep) {
+      if (viewType === 'side') {
+          // Side View: X is Height (Vertical axis)
+          const p1 = mapToCanvas(x, minY); // Height x, Dist min
+          const p2 = mapToCanvas(x, maxY); // Height x, Dist max
+          
+          ctx.beginPath();
+          ctx.moveTo(marginLeft, p1.y); // Clamp to margin
+          ctx.lineTo(marginLeft + drawWidth, p2.y);
+          ctx.stroke();
+
+          // Label on Left
+          if (Math.abs(x % labelStep) < 1) {
+             if (x !== 0 || minX < 0) { 
+                 ctx.textAlign = 'right';
+                 ctx.textBaseline = 'middle';
+                 ctx.fillText(`${x}m`, marginLeft - 15, p1.y);
+             }
+          }
+
+      } else {
+          // Top View: X is Lateral (Horizontal axis)
+          // Vertical lines
+          const p1 = mapToCanvas(x, minY);
+          const p2 = mapToCanvas(x, maxY);
+          
+          ctx.beginPath();
+          ctx.moveTo(p1.x, marginTop);
+          ctx.lineTo(p2.x, marginTop + drawHeight);
+          ctx.stroke();
+
+          // Label on Bottom
+          if (Math.abs(x % labelStep) < 1) {
+              if (Math.abs(x) > 1) {
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'top';
+                ctx.fillText(`${x}m`, p1.x, marginTop + drawHeight + 15);
+              }
+          }
       }
     }
 
-    for (let y = Math.ceil(minY / stepY) * stepY; y <= maxY; y += stepY) {
-      const sy = scaleY(y);
-      ctx.beginPath();
-      ctx.moveTo(0, sy);
-      ctx.lineTo(canvas.width, sy);
-      ctx.stroke();
-      if (y > minY) {
-        ctx.fillText(`${y}m`, 10, sy - 10);
-      }
+    // Iterate World Y (Distance)
+    for (let y = Math.ceil(minY / gridStep) * gridStep; y <= maxY; y += gridStep) {
+        if (viewType === 'side') {
+            // Side View: Y is Distance (Horizontal axis)
+            // Vertical lines
+            const p1 = mapToCanvas(minX, y);
+            const p2 = mapToCanvas(maxX, y);
+
+            ctx.beginPath();
+            ctx.moveTo(p1.x, marginTop);
+            ctx.lineTo(p2.x, marginTop + drawHeight);
+            ctx.stroke();
+
+            // Label on Bottom
+            if (Math.abs(y % labelStep) < 1) {
+                if (y > minY) {
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'top';
+                    ctx.fillText(`${y}m`, p1.x, marginTop + drawHeight + 15);
+                }
+            }
+        } else {
+            // Top View: Y is Distance (Vertical axis)
+            // Horizontal lines
+            const p1 = mapToCanvas(minX, y);
+            const p2 = mapToCanvas(maxX, y);
+
+            ctx.beginPath();
+            ctx.moveTo(marginLeft, p1.y);
+            ctx.lineTo(marginLeft + drawWidth, p2.y);
+            ctx.stroke();
+            
+            // Label on Left
+            if (Math.abs(y % labelStep) < 1) {
+                if (y > minY) {
+                    ctx.textAlign = 'right';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(`${y}m`, marginLeft - 15, p1.y);
+                }
+            }
+        }
     }
     
     ctx.setLineDash([]);
     ctx.shadowBlur = 0;
 
-    // contourLines passed from props
+    // Clip again for data drawing
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(marginLeft, marginTop, drawWidth, drawHeight);
+    ctx.clip();
+
+    // Draw Target Box
+    if (targetBox) {
+        ctx.strokeStyle = 'rgba(250, 204, 21, 0.6)'; // Yellow
+        ctx.lineWidth = 3;
+        ctx.setLineDash([10, 10]);
+        
+        const dim = viewType === 'top' ? targetBox.width : targetBox.height;
+        const half = dim / 2;
+        
+        const c1 = mapToCanvas(-half, 0);
+        const c2 = mapToCanvas(half, 0);
+        const c3 = mapToCanvas(half, targetBox.range);
+        const c4 = mapToCanvas(-half, targetBox.range);
+        
+        ctx.beginPath();
+        ctx.moveTo(c1.x, c1.y);
+        ctx.lineTo(c2.x, c2.y);
+        ctx.lineTo(c3.x, c3.y);
+        ctx.lineTo(c4.x, c4.y);
+        ctx.closePath();
+        ctx.stroke();
+        
+        // Label
+        ctx.fillStyle = 'rgba(250, 204, 21, 0.8)';
+        ctx.font = 'bold 16px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText("TARGET", c3.x + 10, c3.y - 10);
+        
+        ctx.setLineDash([]);
+    }
+
+    // Draw Contours
     ctx.strokeStyle = isFlashing ? '#10b981' : '#4ade80';
-    ctx.lineWidth = isFlashing ? 5 : 4;
+    ctx.lineWidth = isFlashing ? 4 : 3;
     ctx.shadowBlur = isFlashing ? 12 : 8;
     ctx.shadowColor = isFlashing ? 'rgba(16, 185, 129, 0.4)' : 'rgba(0,0,0,0.9)';
     
     ctx.beginPath();
     contourLines.forEach((path) => {
       if (path.length < 2) return;
-      ctx.moveTo(scaleX(path[0].x), scaleY(path[0].y));
+      const start = mapToCanvas(path[0].x, path[0].y);
+      ctx.moveTo(start.x, start.y);
       for (let i = 1; i < path.length; i++) {
-        ctx.lineTo(scaleX(path[i].x), scaleY(path[i].y));
+        const p = mapToCanvas(path[i].x, path[i].y);
+        ctx.lineTo(p.x, p.y);
       }
     });
     ctx.stroke();
     ctx.shadowBlur = 0;
 
-    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-    ctx.lineWidth = 2;
+    // Draw Center Line
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(scaleX(0), 0);
-    ctx.lineTo(scaleX(0), canvas.height);
+    const centerStart = mapToCanvas(0, minY);
+    const centerEnd = mapToCanvas(0, maxY);
+    ctx.moveTo(centerStart.x, centerStart.y);
+    ctx.lineTo(centerEnd.x, centerEnd.y);
     ctx.stroke();
 
-    const centerX = scaleX(0);
-    const centerY = scaleY(0);
-    const arrowLength = 60 * (isFlashing ? pulse : 1);
+    // Draw Arrows (LED Direction)
+    const center = mapToCanvas(0, 0);
+    const scaleFactor = Math.min(drawWidth, drawHeight) * 0.15 * (isFlashing ? pulse : 1);
 
     ctx.shadowBlur = isFlashing ? 15 : 10;
     ctx.shadowColor = isFlashing ? 'rgba(6, 182, 212, 0.7)' : 'rgba(0, 255, 255, 0.5)';
     ctx.strokeStyle = isFlashing ? '#22d3ee' : '#06b6d4';
-    ctx.lineWidth = isFlashing ? 4 : 3;
+    ctx.lineWidth = isFlashing ? 3 : 2;
     ctx.lineCap = 'round';
 
     ledConfig.forEach(({ h, v }) => {
-      // Calculate projected vector components based on view
-      let projX, projY;
+      let projX, projY; 
+
+      // 3D Direction Vector
+      const dx = Math.sin(h) * Math.cos(v); // Lateral
+      const dy = Math.cos(h) * Math.cos(v); // Forward
+      const dz = Math.sin(v);               // Up
+
+      let tip;
 
       if (viewType === 'side') {
-        // Side View (Elevation):
-        // X-axis is Height (Z), Y-axis is Forward (Y)
-        // Vector:
-        // Horizontal component (Z) = sin(v)
-        // Vertical component (Y) = cos(h) * cos(v)
-        
-        projX = Math.sin(v);
-        projY = Math.cos(h) * Math.cos(v);
+        const worldLen = (maxY - minY) * 0.1;
+        const wx = dz * worldLen; // Height
+        const wy = dy * worldLen; // Distance
+        tip = mapToCanvas(wx, wy);
+
       } else {
-        // Top View (Plan):
-        // X-axis is Lateral (X), Y-axis is Forward (Y)
-        // Vector:
-        // Horizontal component (X) = sin(h) * cos(v)
-        // Vertical component (Y) = cos(h) * cos(v)
-        
-        projX = Math.sin(h) * Math.cos(v);
-        projY = Math.cos(h) * Math.cos(v);
+        const worldLen = (maxY - minY) * 0.1;
+        const wx = dx * worldLen; // Lateral
+        const wy = dy * worldLen; // Distance
+        tip = mapToCanvas(wx, wy);
       }
-
-      const endX = centerX + projX * arrowLength;
-      const endY = centerY - projY * arrowLength; // Canvas Y is inverted relative to World Y
-
+      
       ctx.beginPath();
-      ctx.moveTo(centerX, centerY);
-      ctx.lineTo(endX, endY);
+      ctx.moveTo(center.x, center.y);
+      ctx.lineTo(tip.x, tip.y);
       ctx.stroke();
-
-      // Only draw arrowhead if the arrow has significant length
-      const dist = Math.sqrt((endX - centerX)**2 + (endY - centerY)**2);
-      if (dist > 5) {
-        const headSize = 12 * (isFlashing ? pulse : 1);
-        const headAngle = Math.PI / 7;
-        const angle = Math.atan2(endY - centerY, endX - centerX);
-        
-        ctx.beginPath();
-        ctx.moveTo(endX, endY);
-        ctx.lineTo(
-          endX - headSize * Math.cos(angle - headAngle),
-          endY - headSize * Math.sin(angle - headAngle)
-        );
-        ctx.moveTo(endX, endY);
-        ctx.lineTo(
-          endX - headSize * Math.cos(angle + headAngle),
-          endY - headSize * Math.sin(angle + headAngle)
-        );
-        ctx.stroke();
-      }
     });
 
     ctx.fillStyle = '#fff';
     ctx.beginPath();
-    ctx.arc(centerX, centerY, 6, 0, Math.PI * 2);
+    ctx.arc(center.x, center.y, 4, 0, Math.PI * 2);
     ctx.fill();
 
-    // Draw Title/Axis Labels
+    ctx.restore(); // End clipping
+
+    // Draw Title/Axis Labels (Outside clip)
     ctx.save();
-    ctx.fillStyle = 'rgba(255,255,255,0.4)';
-    ctx.font = 'bold 16px sans-serif';
-    ctx.textBaseline = 'top';
     
-    // View Title
+    // View Title (Top Left)
     if (title) {
         ctx.fillStyle = 'white';
         ctx.font = 'bold 20px sans-serif';
-        ctx.fillText(title, 20, 20);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(title, 20, 15);
     }
 
     // Axis Labels
     ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.font = '12px sans-serif';
-    const xLabel = viewType === 'side' ? 'HEIGHT (Z)' : 'LATERAL (X)';
-    const yLabel = 'DISTANCE (Y)';
+    ctx.font = '14px sans-serif';
     
-    // Draw X Label centered at bottom
+    const xLabel = viewType === 'side' ? 'DISTANCE (Y)' : 'LATERAL (X)';
+    const yLabel = viewType === 'side' ? 'HEIGHT (Z)' : 'DISTANCE (Y)';
+    
+    // Bottom Axis Label
     ctx.textAlign = 'center';
-    ctx.fillText(xLabel, canvas.width / 2, canvas.height - 40);
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(xLabel, marginLeft + drawWidth / 2, canvas.height - 15);
 
-    // Draw Y Label rotated on left
-    ctx.translate(30, canvas.height / 2);
+    // Left Axis Label (Rotated)
+    ctx.translate(20, marginTop + drawHeight / 2);
     ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
     ctx.fillText(yLabel, 0, 0);
 
     ctx.restore();
 
-  }, [data, threshold, colorScale, width, height, minX, maxX, minY, maxY, ledConfig, isFlashing, pulse, contourLines, viewType, title]);
+  }, [data, threshold, colorScale, width, height, minX, maxX, minY, maxY, ledConfig, isFlashing, pulse, contourLines, viewType, title, targetBox]);
 
   const displayThreshold = isFlashing ? threshold / 8 : threshold;
 
@@ -262,29 +413,6 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
         height={height * 2}
         className="w-full h-full object-contain"
       />
-      
-      <div className="absolute top-6 right-6 bg-gray-950/80 backdrop-blur-xl p-5 rounded-2xl border border-white/10 text-xs shadow-2xl space-y-4 max-w-[200px]">
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-3">
-            <div className={`w-4 h-4 rounded-full border border-white shadow-[0_0_12px_rgba(74,222,128,0.6)] ${isFlashing ? 'bg-emerald-400 animate-pulse' : 'bg-green-400'}`}></div>
-            <span className="font-black tracking-tight text-white uppercase italic">Detection: {displayThreshold.toExponential(1)} lx</span>
-          </div>
-          {isFlashing && <div className="text-[9px] text-emerald-500 font-bold uppercase tracking-widest pl-7">Temporal Boost (8x)</div>}
-        </div>
-        
-        <div className="flex items-center gap-3">
-          <div className={`w-4 h-1 bg-cyan-400 rounded-full border border-white shadow-[0_0_8px_rgba(6,182,212,0.8)] ${isFlashing ? 'animate-pulse' : ''}`}></div>
-          <span className="font-black tracking-tight text-white uppercase italic">LED Axis</span>
-        </div>
-        
-        <div className="space-y-2">
-           <div className="h-3 w-full rounded-full bg-gradient-to-r from-[#000004] via-[#721f81] via-[#f1605d] to-[#fcfdbf]"></div>
-           <div className="flex justify-between text-[10px] text-gray-500 font-mono font-bold">
-             <span>10⁻⁹ lx</span>
-             <span>1 lx</span>
-           </div>
-        </div>
-      </div>
     </div>
   );
 };

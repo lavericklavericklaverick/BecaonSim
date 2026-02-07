@@ -1,15 +1,50 @@
-
 import React, { useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Grid, Line, Stars, Text } from '@react-three/drei';
+import { OrbitControls, Grid, Line, Stars, Text, Box } from '@react-three/drei';
 import * as THREE from 'three';
 import { Point3D } from '../types';
+
+// Fix for missing JSX Intrinsic Elements types in some environments
+// Explicitly mapping widely used R3F elements to 'any' to avoid "Property does not exist" errors
+// We augment both global JSX and React.JSX to handle different TS configurations
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      group: any;
+      mesh: any;
+      meshBasicMaterial: any;
+      planeGeometry: any;
+      color: any;
+      fog: any;
+      ambientLight: any;
+      pointLight: any;
+      axesHelper: any;
+    }
+  }
+}
+
+declare module 'react' {
+  namespace JSX {
+    interface IntrinsicElements {
+      group: any;
+      mesh: any;
+      meshBasicMaterial: any;
+      planeGeometry: any;
+      color: any;
+      fog: any;
+      ambientLight: any;
+      pointLight: any;
+      axesHelper: any;
+    }
+  }
+}
 
 interface View3DProps {
   paths: Point3D[][];
   isFlashing: boolean;
   maxDist: number;
   lateralSize?: number;
+  targetBox?: { width: number; height: number; range: number };
 }
 
 const LineSegment: React.FC<{ path: Point3D[]; color: string }> = ({ path, color }) => {
@@ -37,6 +72,20 @@ const ThresholdLines: React.FC<{ paths: Point3D[][]; color: string }> = ({ paths
       {paths.map((path, i) => (
         <LineSegment key={i} path={path} color={color} />
       ))}
+    </group>
+  );
+};
+
+const TargetBox: React.FC<{ width: number; height: number; range: number }> = ({ width, height, range }) => {
+  return (
+    <group position={[0, 0, -range / 2]}>
+        <Box args={[width, height, range]}>
+            <meshBasicMaterial color="#facc15" wireframe transparent opacity={0.3} />
+        </Box>
+        {/* Label */}
+        <Text position={[0, height/2 + 50, 0]} fontSize={100} color="#facc15" anchorX="center" anchorY="bottom">
+            TARGET
+        </Text>
     </group>
   );
 };
@@ -100,7 +149,7 @@ const MetricScale: React.FC<{ maxDist: number; floorY: number }> = ({ maxDist, f
     return <group>{ticks}</group>;
 };
 
-const View3D: React.FC<View3DProps> = ({ paths, isFlashing, maxDist, lateralSize = 2000 }) => {
+const View3D: React.FC<View3DProps> = ({ paths, isFlashing, maxDist, lateralSize = 2000, targetBox }) => {
   const lineColor = isFlashing ? '#34d399' : '#4ade80';
 
   // Position grid at the center of the simulation bounding box (Y=0)
@@ -146,6 +195,9 @@ const View3D: React.FC<View3DProps> = ({ paths, isFlashing, maxDist, lateralSize
         <group position={[0, 0, 0]}>
            {/* Lines */}
            <ThresholdLines paths={paths} color={lineColor} />
+           
+           {/* Target Box */}
+           {targetBox && <TargetBox {...targetBox} />}
            
            <MetricScale maxDist={maxDist} floorY={floorY} />
 
