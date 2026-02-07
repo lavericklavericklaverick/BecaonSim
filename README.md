@@ -35,3 +35,11 @@ Build the site for GitHub Pages (output will be placed in the `docs/` folder):
 3. In your repository settings on GitHub, enable GitHub Pages and set the source to the `docs/` folder on the `main` branch.
 
 The site will be served at: `https://<your-username>.github.io/BecaonSim/`
+
+Alternatively you can use the provided `deploy` script which builds and publishes using `gh-pages`:
+
+```bash
+npm run deploy
+```
+
+This will build the site and publish the output to the `gh-pages` branch.
