@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react'
 
 // For GitHub Pages, Vite must know the repo sub-path.
 // Your target URL is: https://lavericklavericklaverick.github.io/BecaonSim/
-const GH_PAGES_BASE = '/BecaonSim/'
+const GH_PAGES_BASE = '/BeaconSim/'
 
 export default defineConfig(({ command }) => ({
   plugins: [react()],
