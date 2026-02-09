@@ -249,6 +249,56 @@ const Instructions: React.FC = () => {
           </div>
         </div>
 
+        {/* Section 5: Infrared (IR) & Night Vision (NEW) */}
+        <div className="space-y-6">
+          <div className="flex items-center gap-4 border-b border-white/5 pb-4">
+             <div className="w-10 h-10 rounded-xl bg-rose-500/20 flex items-center justify-center text-rose-400">
+                <i className="fas fa-glasses text-xl"></i>
+             </div>
+             <h3 className="text-xl font-bold text-white uppercase tracking-wider">5. Infrared & Night Vision Operations</h3>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+             <div className="bg-black/20 p-6 rounded-2xl border border-white/5 hover:border-rose-500/30 transition-colors">
+                <h4 className="text-rose-400 font-black uppercase tracking-widest text-xs mb-3">Automatic Radiometric Switching</h4>
+                <p className="text-gray-400 text-xs leading-relaxed mb-4">
+                   When you select a wavelength of <b>800nm or higher</b>, the simulator automatically switches from Photometric (human vision) mode to Radiometric (sensor) mode.
+                </p>
+                <ul className="space-y-2 text-[10px] text-gray-400 font-mono">
+                   <li className="flex items-center gap-2">
+                       <i className="fas fa-long-arrow-alt-right text-gray-600"></i>
+                       <span>Intensity Units: <b className="text-white">Candela (cd)</b> → <b className="text-rose-400">Milliwatts/sr (mW/sr)</b></span>
+                   </li>
+                   <li className="flex items-center gap-2">
+                       <i className="fas fa-long-arrow-alt-right text-gray-600"></i>
+                       <span>Threshold Units: <b className="text-white">Lux (lx)</b> → <b className="text-rose-400">Watts/m² (W/m²)</b></span>
+                   </li>
+                </ul>
+             </div>
+
+             <div className="bg-black/20 p-6 rounded-2xl border border-white/5 hover:border-rose-500/30 transition-colors">
+                <h4 className="text-rose-400 font-black uppercase tracking-widest text-xs mb-3">Night Vision Goggles (NVG) Sensitivity</h4>
+                <p className="text-gray-400 text-xs leading-relaxed mb-4">
+                   NVGs (Gen 2/3) amplify ambient photons. Their sensitivity defines the "threshold" required for a light source to be visible against the background noise.
+                </p>
+                
+                <div className="space-y-3">
+                   <div className="bg-gray-900 p-2 rounded-lg border border-white/10 flex items-center justify-between">
+                       <span className="text-[10px] text-gray-500 uppercase font-bold">Gen 3 Sensitivity</span>
+                       <span className="text-[10px] font-mono text-emerald-400">~1.0 × 10⁻⁹ W/m²</span>
+                   </div>
+                   <div className="bg-gray-900 p-2 rounded-lg border border-white/10 flex items-center justify-between">
+                       <span className="text-[10px] text-gray-500 uppercase font-bold">Simulator Default</span>
+                       <span className="text-[10px] font-mono text-yellow-400">1.0 × 10⁻⁹ W/m² (1 nW)</span>
+                   </div>
+                   <p className="text-[9px] text-gray-500 italic mt-1">
+                       *The default (10⁻⁹) is conservative, representing a "clear & bright" signal well above the noise floor. Adjust the Threshold slider to simulate extreme sensitivity.
+                   </p>
+                </div>
+             </div>
+          </div>
+        </div>
+
       </div>
     </div>
   );

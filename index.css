@@ -1,2 +1,4 @@
-@import "tailwindcss";
-@plugin "tailwindcss-animate";
+/*
+	Note: This project uses Tailwind via the CDN script in `index.html`.
+	Keeping this file minimal avoids requiring Tailwind/PostCSS during `vite build`.
+*/

@@ -27,12 +27,9 @@ export const PHOTOPIC_DATA: [number, number][] = [
 
 export const DEFAULT_BEAM_PATTERN: BeamPoint[] = [
   { angle: 0, intensity: 1.0 },
-  { angle: 10, intensity: 0.82 },
-  { angle: 20, intensity: 0.5 },
-  { angle: 30, intensity: 0 },
-  { angle: 40, intensity: 0 },
-  { angle: 60, intensity: 0 },
-  { angle: 90, intensity: 0 }
+  { angle: 10, intensity: 0.9 },
+  { angle: 20, intensity: 0.45 },
+  { angle: 30, intensity: 0.0 }
 ];
 
 export const DEFAULT_GRID_LIMITS: GridLimits = {
@@ -52,7 +49,8 @@ export const COLOR_PRESETS: ColorPreset[] = [
   { name: 'Amber', wavelength: 595, hex: '#FFBF00' },
   { name: 'Red-Orange', wavelength: 610, hex: '#FF4500' },
   { name: 'Red', wavelength: 625, hex: '#FF0000' },
-  { name: 'Deep Red', wavelength: 660, hex: '#8B0000' }
+  { name: 'Deep Red', wavelength: 660, hex: '#8B0000' },
+  { name: 'Infrared', wavelength: 850, hex: '#be123c' }
 ];
 
-export const GRID_RES = 400;
+export const GRID_RES = 450;

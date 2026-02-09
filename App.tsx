@@ -1,7 +1,8 @@
+
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { SimulationParams, GridData, ColorPreset, BeamPoint, Point, Point3D } from './types';
 import { GRID_RES, COLOR_PRESETS, DEFAULT_BEAM_PATTERN, DEFAULT_GRID_LIMITS } from './constants';
-import { getEffectiveEfficiency, calculateIlluminance } from './physics';
+import { getSpectralCorrectionFactor, calculateIlluminance } from './physics';
 import { marchSquares } from './utils/marchSquares';
 import { downloadDXF } from './utils/dxfExporter';
 import Heatmap from './components/Heatmap';
@@ -49,19 +50,44 @@ interface SliderProps {
   unit?: string;
   onChange: (val: number) => void;
   color?: string;
+  showMarkers?: boolean;
 }
 
 /**
  * Custom styled slider for simulation parameters
  */
-const ControlSlider: React.FC<SliderProps> = ({ label, val, min, max, step, unit = "", onChange, color = "accent-indigo-500" }) => (
+const ControlSlider: React.FC<SliderProps> = ({ label, val, min, max, step, unit = "", onChange, color = "accent-indigo-500", showMarkers }) => (
   <div className="group">
     <label className="flex justify-between text-[11px] font-black text-gray-500 mb-3 uppercase tracking-wider group-hover:text-gray-300 transition-colors">
       <span>{label}</span>
-      <span className="font-mono text-indigo-400 bg-indigo-500/10 px-2 rounded-md">{val.toFixed(step < 1 ? 1 : 0)}{unit}</span>
+      <span className="font-mono text-indigo-400 bg-indigo-500/10 px-2 rounded-md">
+        {unit.includes("Log") ? `10^${val.toFixed(1)}` : val.toFixed(step < 1 ? 1 : 0)}
+        {unit.replace("Log", "")}
+      </span>
     </label>
     <input type="range" min={min} max={max} step={step} value={val} onChange={e => onChange(parseFloat(e.target.value))}
       className={`w-full h-1 bg-white/5 rounded-full appearance-none cursor-pointer hover:bg-white/10 transition-colors ${color}`} />
+
+    {showMarkers && (
+        <div className="flex justify-between mt-2 px-1 select-none">
+            {Array.from({ length: Math.round((max - min) / step) + 1 }).map((_, i) => {
+                const tickValue = min + i * step;
+                const active = val === tickValue;
+                return (
+                    <div 
+                        key={tickValue} 
+                        onClick={() => onChange(tickValue)}
+                        className="flex flex-col items-center cursor-pointer group/tick w-4"
+                    >
+                        <div className={`w-0.5 h-1.5 mb-1 rounded-full transition-colors ${active ? 'bg-indigo-500' : 'bg-white/10 group-hover/tick:bg-white/30'}`}></div>
+                        <span className={`text-[9px] font-mono transition-colors ${active ? 'text-indigo-400 font-bold' : 'text-gray-600 group-hover/tick:text-gray-400'}`}>
+                            {tickValue}
+                        </span>
+                    </div>
+                );
+            })}
+        </div>
+    )}
   </div>
 );
 
@@ -129,7 +155,8 @@ const App: React.FC = () => {
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [optResults, setOptResults] = useState<OptResult[]>([]);
   const [showTarget, setShowTarget] = useState(false);
-  const [autoScale, setAutoScale] = useState(true);
+  const [autoScale, setAutoScale] = useState(false);
+  const [showCones, setShowCones] = useState(true);
 
   const [topGrid, setTopGrid] = useState<GridData | null>(null);
   const [sideGrid, setSideGrid] = useState<GridData | null>(null);
@@ -137,12 +164,36 @@ const App: React.FC = () => {
   const [isCalculating, setIsCalculating] = useState(false);
   const [activeTab, setActiveTab] = useState<'2D' | '3D' | 'HELP'>('2D');
 
-  const effectiveEfficiency = useMemo(() => getEffectiveEfficiency(params.wavelength), [params.wavelength]);
+  const isInfrared = useMemo(() => params.wavelength >= 800, [params.wavelength]);
+
+  // --- PHYSICS ENGINE HOOKS ---
+  // Calculates the boost factor for scotopic (night) vision based on wavelength.
+  // Blue/Green light gets a significant boost (up to ~16x for deep blue) compared to Photopic Cd.
+  // Returns 1.0 for Infrared.
+  const spectralCorrection = useMemo(() => getSpectralCorrectionFactor(params.wavelength), [params.wavelength]);
   
+  // Effective threshold calculation.
+  // NOTE ON FLASHING:
+  // We apply a Conspicuity Gain of 8x (0.9 log units) for flashing lights.
+  const effectiveThreshold = useMemo(() => {
+     // Always treat logThreshold as logarithmic (base 10).
+     // For Visible: 10^x Lux.
+     // For Infrared: 10^x W/m^2.
+     const base = Math.pow(10, params.logThreshold);
+     return params.isFlashing ? base / 8.0 : base;
+  }, [params.isFlashing, params.logThreshold]);
+
   // Calculate full 3D configuration of LEDs {h, v}
   const ledConfig = useMemo(() => {
     return generateLedConfig(params.ledCount, params.spreadAngle, params.rowCount, params.verticalSpreadAngle);
   }, [params.ledCount, params.spreadAngle, params.rowCount, params.verticalSpreadAngle]);
+
+  // Determine the intensity value to pass to the physics engine
+  // IR: Input is mW/sr -> Convert to W/sr for physics (so output is W/m^2)
+  // Vis: Input is cd -> Keep as cd (so output is Lux)
+  const sourceIntensity = useMemo(() => {
+      return isInfrared ? params.peakCandela / 1000 : params.peakCandela;
+  }, [isInfrared, params.peakCandela]);
 
   const runSimulation = useCallback(() => {
     setIsCalculating(true);
@@ -167,7 +218,7 @@ const App: React.FC = () => {
           const x = minX + gx * dx;
           let total = 0;
           for (const cfg of ledConfig) {
-            total += calculateIlluminance(x, y, 0, cfg.h, cfg.v, params.peakCandela, effectiveEfficiency, params.beamPattern);
+            total += calculateIlluminance(x, y, 0, cfg.h, cfg.v, sourceIntensity, spectralCorrection, params.beamPattern);
           }
           topData[gy * GRID_RES + gx] = total;
         }
@@ -180,7 +231,7 @@ const App: React.FC = () => {
           const z = minZ + gx * dz; // World Z maps to Grid X
           let total = 0;
           for (const cfg of ledConfig) {
-            total += calculateIlluminance(0, y, z, cfg.h, cfg.v, params.peakCandela, effectiveEfficiency, params.beamPattern);
+            total += calculateIlluminance(0, y, z, cfg.h, cfg.v, sourceIntensity, spectralCorrection, params.beamPattern);
           }
           sideData[gy * GRID_RES + gx] = total;
         }
@@ -201,11 +252,12 @@ const App: React.FC = () => {
       });
 
       // --- 3. 3D Wireframe Slices ---
-      // Use odd number for resolution to ensure center pixel (0,0) is sampled
+      // Reduced SLICE RESOLUTION and COUNT for better visual aesthetics (less cluttered wireframe)
       const SLICE_RES = 151; 
-      const NUM_SLICES = 60; // Increased density for tighter lines
+      const NUM_SLICES = 24; // Lower count to prevent "wall of lines" look
       const slicePaths: Point3D[][] = [];
-      const threshold = params.isFlashing ? Math.pow(10, params.logThreshold) / 8 : Math.pow(10, params.logThreshold);
+      // Use the effective threshold for contour generation
+      const threshold = effectiveThreshold;
 
       // Helper for slice data
       const getSliceData = (
@@ -230,7 +282,7 @@ const App: React.FC = () => {
             const wz = isHorizontalSlice ? fixedCoord : a;
 
             for (const cfg of ledConfig) {
-              total += calculateIlluminance(wx, wy, wz, cfg.h, cfg.v, params.peakCandela, effectiveEfficiency, params.beamPattern);
+              total += calculateIlluminance(wx, wy, wz, cfg.h, cfg.v, sourceIntensity, spectralCorrection, params.beamPattern);
             }
             data[gy * width + gx] = total;
           }
@@ -280,12 +332,11 @@ const App: React.FC = () => {
     }, 0);
   }, [
       ledConfig, 
-      params.peakCandela, 
-      effectiveEfficiency, 
+      sourceIntensity, 
+      spectralCorrection, 
       params.beamPattern, 
       params.gridLimits, 
-      params.logThreshold, 
-      params.isFlashing
+      effectiveThreshold
     ]);
 
   useEffect(() => {
@@ -299,8 +350,7 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!autoScale || !topGrid || !sideGrid || isCalculating) return;
 
-    // Determine bounds of the threshold contour
-    const threshold = params.isFlashing ? Math.pow(10, params.logThreshold) / 8 : Math.pow(10, params.logThreshold);
+    const threshold = effectiveThreshold;
     
     // Helper to find max extent in a grid
     const getExtent = (grid: GridData) => {
@@ -325,7 +375,7 @@ const App: React.FC = () => {
     const topExt = getExtent(topGrid);
     const sideExt = getExtent(sideGrid);
 
-    const neededLat = Math.max(topExt.maxDim, sideExt.maxDim); // Height is Z, Lat is X. both symmetrical around 0.
+    const neededLat = Math.max(topExt.maxDim, sideExt.maxDim); 
     const neededRange = Math.max(topExt.maxRange, sideExt.maxRange);
 
     if (neededLat === 0 || neededRange === 0) return; // No light detected
@@ -339,11 +389,12 @@ const App: React.FC = () => {
 
     if (diffX > 0.1 || diffY > 0.1) {
        // Also ensure we don't zoom in to absurdly small levels
-       const clampedX = Math.max(200, newMaxX);
-       const clampedY = Math.max(200, newMaxY);
+       // But if Infrared, we might need small levels. Let's adjust min clamp.
+       const minClamp = isInfrared ? 10 : 200;
+       const clampedX = Math.max(minClamp, newMaxX);
+       const clampedY = Math.max(minClamp, newMaxY);
 
-       // Check if clamped is still different
-       if (Math.abs(clampedX - params.gridLimits.maxX) > 50 || Math.abs(clampedY - params.gridLimits.maxY) > 50) {
+       if (Math.abs(clampedX - params.gridLimits.maxX) > (isInfrared ? 5 : 50) || Math.abs(clampedY - params.gridLimits.maxY) > (isInfrared ? 5 : 50)) {
            console.log("Auto-Scaling to:", clampedX, clampedY);
            setParams(prev => ({
              ...prev,
@@ -357,23 +408,50 @@ const App: React.FC = () => {
        }
     }
 
-  }, [topGrid, sideGrid, autoScale, isCalculating, params.logThreshold, params.isFlashing, params.gridLimits.maxX, params.gridLimits.maxY]);
+  }, [topGrid, sideGrid, autoScale, isCalculating, effectiveThreshold, params.gridLimits.maxX, params.gridLimits.maxY, isInfrared]);
 
 
   const contourPathsTop = useMemo(() => {
     if (!topGrid) return [];
-    const effectiveThreshold = params.isFlashing ? Math.pow(10, params.logThreshold) / 8 : Math.pow(10, params.logThreshold);
     return marchSquares(topGrid, effectiveThreshold);
-  }, [topGrid, params.logThreshold, params.isFlashing]);
+  }, [topGrid, effectiveThreshold]);
 
   const contourPathsSide = useMemo(() => {
     if (!sideGrid) return [];
-    const effectiveThreshold = params.isFlashing ? Math.pow(10, params.logThreshold) / 8 : Math.pow(10, params.logThreshold);
     return marchSquares(sideGrid, effectiveThreshold);
-  }, [sideGrid, params.logThreshold, params.isFlashing]);
+  }, [sideGrid, effectiveThreshold]);
 
   const updateParam = <K extends keyof SimulationParams>(key: K, value: any) => {
     setParams(prev => ({ ...prev, [key]: value }));
+  };
+
+  const handlePresetSelect = (p: ColorPreset) => {
+      const isSwitchingToIR = p.wavelength >= 800;
+      const isSwitchingFromIR = params.wavelength >= 800 && p.wavelength < 800;
+
+      if (isSwitchingToIR) {
+          // Defaults for IR as requested
+          setParams(prev => ({
+              ...prev,
+              wavelength: p.wavelength,
+              peakCandela: 180, // mW/sr
+              logThreshold: -9, // 1nW/m2
+              gridLimits: {
+                  minX: -5000, maxX: 5000, minY: 0, maxY: 10000 
+              }
+          }));
+      } else if (isSwitchingFromIR) {
+          // Reset to Visible Defaults
+          setParams(prev => ({
+              ...prev,
+              wavelength: p.wavelength,
+              peakCandela: 1.0, // cd
+              logThreshold: -6, // log lx
+              gridLimits: { ...DEFAULT_GRID_LIMITS }
+          }));
+      } else {
+          updateParam('wavelength', p.wavelength);
+      }
   };
 
   const updateGridLimit = (field: keyof typeof DEFAULT_GRID_LIMITS, value: number) => {
@@ -400,27 +478,24 @@ const App: React.FC = () => {
       spreadAngle: res.h,
       verticalSpreadAngle: res.v
     }));
-    setShowTarget(true); // Automatically show target when applying optimization
+    setShowTarget(true); 
   };
 
   const handleOptimize = useCallback(async () => {
     setIsOptimizing(true);
     setOptResults([]);
     
-    // Defer to allow UI render
     await new Promise(r => setTimeout(r, 50));
 
-    const threshold = params.isFlashing ? Math.pow(10, params.logThreshold) / 8 : Math.pow(10, params.logThreshold);
+    const threshold = effectiveThreshold;
     const targetW = optTargets.width;
     const targetH = optTargets.height;
     const targetR = optTargets.range;
 
-    // Generate sampling points (First quadrant symmetry)
-    // We check points inside [0, W/2] x [0, H/2] x [0, R]
     const samples: Point3D[] = [];
-    const stepX = 4; // 5 steps: 0, 25%, 50%, 75%, 100% of half-width
-    const stepZ = 4; // 5 steps
-    const stepY = 8; // 8 steps along range
+    const stepX = 4; 
+    const stepZ = 4; 
+    const stepY = 8; 
     
     for(let i=0; i<=stepX; i++) {
         const x = (i/stepX) * (targetW/2);
@@ -434,7 +509,6 @@ const App: React.FC = () => {
     }
     const maxHits = samples.length;
 
-    // Helper: Binary search to find extent of beam in a specific direction (for reporting stats)
     const findExtent = (
         cfg: {h:number, v:number}[], 
         startP: Point3D, 
@@ -445,7 +519,7 @@ const App: React.FC = () => {
         let high = maxDist;
         let limit = 0;
         
-        for(let i=0; i<12; i++) { // Reduced iterations for speed
+        for(let i=0; i<12; i++) { 
             const mid = (low + high) / 2;
             const x = startP.x + dir.x * mid;
             const y = startP.y + dir.y * mid;
@@ -453,7 +527,7 @@ const App: React.FC = () => {
             
             let total = 0;
             for (const c of cfg) {
-                total += calculateIlluminance(x, y, z, c.h, c.v, params.peakCandela, effectiveEfficiency, params.beamPattern);
+                total += calculateIlluminance(x, y, z, c.h, c.v, sourceIntensity, spectralCorrection, params.beamPattern);
             }
             
             if (total >= threshold) {
@@ -467,30 +541,25 @@ const App: React.FC = () => {
     };
 
     const validResults: OptResult[] = [];
-    const step = 2; // Coarse step for spread angles
+    const step = 2; 
     
     for (let h = 0; h <= 80; h += step) {
         for (let v = 0; v <= 80; v += step) {
              const cfg = generateLedConfig(params.ledCount, h, params.rowCount, v);
              
-             // 1. Calculate Coverage Score (Max Volume Inside Box)
              let hits = 0;
              for(const p of samples) {
                  let total = 0;
                  for (const c of cfg) {
-                    total += calculateIlluminance(p.x, p.y, p.z, c.h, c.v, params.peakCandela, effectiveEfficiency, params.beamPattern);
+                    total += calculateIlluminance(p.x, p.y, p.z, c.h, c.v, sourceIntensity, spectralCorrection, params.beamPattern);
                  }
                  if (total >= threshold) hits++;
              }
              
              const coverage = (hits / maxHits) * 100;
 
-             // 2. Filter low coverage results to keep list clean
-             if (coverage > 2) { // at least 2% coverage
-                 // 3. Calculate actual stats for display info
-                 // Max Range (Y)
+             if (coverage > 2) { 
                  const range = findExtent(cfg, {x:0, y:0, z:0}, {x:0, y:1, z:0}, targetR * 2);
-                 // Width at mid-range
                  const halfWidth = findExtent(cfg, {x:0, y:range * 0.5, z:0}, {x:1, y:0, z:0}, targetW * 2);
                  const halfHeight = findExtent(cfg, {x:0, y:range * 0.5, z:0}, {x:0, y:0, z:1}, targetH * 2);
 
@@ -505,40 +574,45 @@ const App: React.FC = () => {
         }
     }
     
-    // Sort by coverage descending
     validResults.sort((a, b) => b.vol - a.vol);
-    setOptResults(validResults.slice(0, 100)); // Limit to top 100
+    setOptResults(validResults.slice(0, 100)); 
     setIsOptimizing(false);
-    setShowTarget(true); // Enable target view on finish
+    setShowTarget(true); 
 
-  }, [params.ledCount, params.rowCount, params.peakCandela, params.beamPattern, params.isFlashing, params.logThreshold, effectiveEfficiency, optTargets]);
+  }, [params.ledCount, params.rowCount, sourceIntensity, params.beamPattern, spectralCorrection, effectiveThreshold, optTargets]);
 
 
   return (
-    <div className="max-w-[1800px] mx-auto px-6 py-10 bg-gray-950 min-h-screen text-gray-200 selection:bg-indigo-500/30">
-      <header className="mb-10 border-b border-white/5 pb-8 flex items-center gap-6">
-        <div className="w-14 h-14 bg-gradient-to-br from-indigo-600 via-indigo-500 to-emerald-400 rounded-2xl flex items-center justify-center shadow-2xl shadow-indigo-500/20 rotate-3 transition-transform hover:rotate-0 duration-500 cursor-pointer flex-shrink-0">
-           <i className="fas fa-flux-capacitor text-white text-2xl"></i>
-        </div>
-        <div>
-          <h1 className="text-3xl font-black tracking-tighter text-white leading-tight">
-            LED PROPAGATION
-          </h1>
-          <p className="text-gray-500 font-bold uppercase tracking-widest text-[10px] mt-1 opacity-80">
-            Composite Vision Engine v2.5
-          </p>
-        </div>
-      </header>
-
+    <div className="max-w-[1800px] mx-auto px-6 py-4 bg-gray-950 min-h-screen text-gray-200 selection:bg-indigo-500/30">
+      
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
         <aside className="lg:col-span-4 xl:col-span-3 space-y-4">
           <div className="bg-gray-900/50 border border-white/5 rounded-[2rem] p-4 shadow-2xl backdrop-blur-3xl space-y-2">
             
-            {/* 1. Optical Parameters (Datasheet mapping first) */}
             <CollapsibleSection title="Optical Parameters" icon="fa-lightbulb" defaultOpen={true}>
               <div className="space-y-6 py-2">
-                <ControlSlider label="Peak Intensity" val={params.peakCandela} unit=" cd" min={0} max={5} step={0.1} onChange={v => updateParam('peakCandela', v)} />
-                <ControlSlider label="Wavelength" val={params.wavelength} unit=" nm" min={380} max={700} step={5} onChange={v => updateParam('wavelength', v)} />
+                
+                {/* DYNAMIC INTENSITY SLIDER */}
+                {isInfrared ? (
+                    <ControlSlider 
+                        label="Radiant Intensity" 
+                        val={params.peakCandela} 
+                        unit=" mW/sr" 
+                        min={0} max={1000} step={10} 
+                        onChange={v => updateParam('peakCandela', v)} 
+                        color="accent-rose-500"
+                    />
+                ) : (
+                    <ControlSlider 
+                        label="Peak Intensity" 
+                        val={params.peakCandela} 
+                        unit=" cd" 
+                        min={0} max={5} step={0.1} 
+                        onChange={v => updateParam('peakCandela', v)} 
+                    />
+                )}
+
+                <ControlSlider label="Wavelength" val={params.wavelength} unit=" nm" min={380} max={950} step={5} onChange={v => updateParam('wavelength', v)} />
                 
                 <div className="pt-2">
                   <label className="flex items-center justify-between cursor-pointer group">
@@ -558,7 +632,7 @@ const App: React.FC = () => {
 
                 <div className="flex flex-wrap gap-2 mt-4">
                   {COLOR_PRESETS.map((p) => (
-                    <button key={p.wavelength} onClick={() => updateParam('wavelength', p.wavelength)} 
+                    <button key={p.wavelength} onClick={() => handlePresetSelect(p)} 
                       className={`w-7 h-7 rounded-lg border-2 transition-all ${params.wavelength === p.wavelength ? 'border-white scale-110 shadow-lg' : 'border-transparent opacity-40 hover:opacity-100'}`} 
                       style={{ backgroundColor: p.hex }} title={p.name} />
                   ))}
@@ -566,7 +640,6 @@ const App: React.FC = () => {
               </div>
             </CollapsibleSection>
 
-            {/* 2. Beam Pattern Table (Detailed datasheet mapping) */}
             <CollapsibleSection title="Beam Pattern Table" icon="fa-chart-area" defaultOpen={false}>
               <div className="py-2">
                 <div className="rounded-2xl border border-white/5 overflow-hidden bg-black/30">
@@ -591,24 +664,22 @@ const App: React.FC = () => {
               </div>
             </CollapsibleSection>
 
-            {/* 3. Array Configuration (Geometry) */}
             <CollapsibleSection title="Array Configuration" icon="fa-th" defaultOpen={true}>
               <div className="space-y-6 py-2">
                 <div className="bg-white/5 rounded-xl p-3 mb-2">
                     <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest block mb-4">Plan (Horizontal)</span>
-                    <ControlSlider label="LED Columns" val={params.ledCount} min={1} max={8} step={1} onChange={v => updateParam('ledCount', v)} />
+                    <ControlSlider label="LED Columns" val={params.ledCount} min={1} max={8} step={1} onChange={v => updateParam('ledCount', v)} showMarkers={true} />
                     <ControlSlider label="Plan Spread" val={params.spreadAngle} unit="°" min={0} max={180} step={1} onChange={v => updateParam('spreadAngle', v)} />
                 </div>
                 
                 <div className="bg-white/5 rounded-xl p-3">
                     <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest block mb-4">Elevation (Vertical)</span>
-                    <ControlSlider label="LED Rows" val={params.rowCount} min={1} max={8} step={1} onChange={v => updateParam('rowCount', v)} />
+                    <ControlSlider label="LED Rows" val={params.rowCount} min={1} max={8} step={1} onChange={v => updateParam('rowCount', v)} showMarkers={true} />
                     <ControlSlider label="Elev Spread" val={params.verticalSpreadAngle} unit="°" min={0} max={180} step={1} onChange={v => updateParam('verticalSpreadAngle', v)} />
                 </div>
               </div>
             </CollapsibleSection>
 
-            {/* 4. Auto-Optimizer (Optimization) */}
             <CollapsibleSection title="Auto-Optimizer" icon="fa-magic" defaultOpen={false}>
               <div className="py-2 space-y-4">
                 <p className="text-[10px] text-gray-500 leading-relaxed">
@@ -721,14 +792,31 @@ const App: React.FC = () => {
               </div>
             </CollapsibleSection>
 
-            {/* 5. Detection Threshold (Physics) */}
             <CollapsibleSection title="Detection Threshold" icon="fa-low-vision" defaultOpen={true}>
               <div className="py-2">
-                 <ControlSlider label="Log₁₀ lx" val={params.logThreshold} min={-12} max={-2} step={0.1} onChange={v => updateParam('logThreshold', v)} color="accent-emerald-500" />
+                 {/* DYNAMIC THRESHOLD SLIDER */}
+                 {isInfrared ? (
+                     <ControlSlider 
+                        label="Irradiance Limit" 
+                        val={params.logThreshold} 
+                        min={-10} max={-2} step={0.1} 
+                        unit="Log W/m²"
+                        onChange={v => updateParam('logThreshold', v)} 
+                        color="accent-rose-500" 
+                     />
+                 ) : (
+                     <ControlSlider 
+                        label="Illuminance Limit" 
+                        val={params.logThreshold} 
+                        min={-12} max={-2} step={0.1} 
+                        unit="Log lx"
+                        onChange={v => updateParam('logThreshold', v)} 
+                        color="accent-emerald-500" 
+                     />
+                 )}
               </div>
             </CollapsibleSection>
 
-            {/* 6. View Limits (Visualization) */}
             <CollapsibleSection title="View Limits" icon="fa-expand-arrows-alt" defaultOpen={false}>
               <div className="space-y-6 py-2">
                 <div className="flex items-center justify-between bg-black/20 p-2 rounded-lg mb-4 border border-white/5">
@@ -739,18 +827,17 @@ const App: React.FC = () => {
                    {autoScale && <span className="text-[9px] text-indigo-400 animate-pulse">Active</span>}
                 </div>
                 
-                <ControlSlider label="Lateral Range" val={params.gridLimits.maxX} unit="m" min={100} max={20000} step={100} onChange={v => {
+                <ControlSlider label="Lateral Range" val={params.gridLimits.maxX} unit="m" min={isInfrared ? 10 : 100} max={20000} step={isInfrared ? 10 : 100} onChange={v => {
                   updateGridLimit('maxX', v);
                   updateGridLimit('minX', -v);
                 }} />
-                <ControlSlider label="Forward Range" val={params.gridLimits.maxY} unit="m" min={100} max={20000} step={100} onChange={v => updateGridLimit('maxY', v)} />
+                <ControlSlider label="Forward Range" val={params.gridLimits.maxY} unit="m" min={isInfrared ? 10 : 100} max={20000} step={isInfrared ? 10 : 100} onChange={v => updateGridLimit('maxY', v)} />
               </div>
             </CollapsibleSection>
           </div>
         </aside>
 
         <main className="lg:col-span-8 xl:col-span-9 space-y-6">
-          {/* Tab Navigation */}
           <div className="flex items-center space-x-6 border-b border-white/5 mb-4">
              <button 
                onClick={() => setActiveTab('2D')} 
@@ -777,12 +864,11 @@ const App: React.FC = () => {
 
           {activeTab === '2D' && (
             <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              {/* Main Top View */}
               <div className="bg-gray-900 border border-white/5 rounded-[3rem] p-3 shadow-3xl overflow-hidden ring-1 ring-white/5 relative group">
                 {topGrid ? (
                   <Heatmap 
                     grid={topGrid} 
-                    threshold={Math.pow(10, params.logThreshold)} 
+                    threshold={effectiveThreshold} 
                     ledConfig={ledConfig} 
                     isFlashing={params.isFlashing}
                     contourLines={contourPathsTop}
@@ -797,7 +883,6 @@ const App: React.FC = () => {
                   </div>
                 )}
                 
-                {/* Overlay Export Button (Only on Top View) */}
                 <div className="absolute bottom-10 left-10 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
                   <button 
                     onClick={handleExportCAD}
@@ -815,12 +900,11 @@ const App: React.FC = () => {
                 </div>
               </div>
 
-              {/* Side View */}
               <div className="bg-gray-900 border border-white/5 rounded-[3rem] p-3 shadow-3xl overflow-hidden ring-1 ring-white/5 relative group">
                 {sideGrid ? (
                   <Heatmap 
                     grid={sideGrid} 
-                    threshold={Math.pow(10, params.logThreshold)} 
+                    threshold={effectiveThreshold} 
                     ledConfig={ledConfig} 
                     isFlashing={params.isFlashing}
                     contourLines={contourPathsSide}
@@ -838,14 +922,30 @@ const App: React.FC = () => {
           )}
           
           {activeTab === '3D' && (
-            <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 relative">
               <View3D 
                 paths={slices3D} 
                 isFlashing={params.isFlashing} 
                 maxDist={params.gridLimits.maxY} 
                 lateralSize={params.gridLimits.maxX}
                 targetBox={showTarget ? optTargets : undefined}
+                showCones={showCones}
+                ledConfig={ledConfig}
+                beamPattern={params.beamPattern}
+                wavelength={params.wavelength}
+                peakCandela={sourceIntensity}
+                effectiveEfficiency={spectralCorrection}
+                threshold={effectiveThreshold}
               />
+              <div className="absolute top-6 right-8 z-20">
+                <button 
+                  onClick={() => setShowCones(!showCones)}
+                  className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2 ${showCones ? 'bg-indigo-500/20 border-indigo-500 text-indigo-400' : 'bg-black/40 border-white/10 text-gray-500 hover:text-white'}`}
+                >
+                  <i className={`fas ${showCones ? 'fa-eye' : 'fa-eye-slash'}`}></i>
+                  {showCones ? 'Light Cones ON' : 'Light Cones OFF'}
+                </button>
+              </div>
             </div>
           )}
 
@@ -859,11 +959,11 @@ const App: React.FC = () => {
              <div className="flex gap-6">
                <span className="flex items-center gap-2">
                  <i className="fas fa-eye text-emerald-500/50"></i>
-                 Composite Efficiency: {(effectiveEfficiency * 100).toFixed(1)}%
+                 {isInfrared ? 'Correction: None (Radiometric)' : `Spectral Factor: ${spectralCorrection.toFixed(2)}x`}
                </span>
                <span className="flex items-center gap-2">
                  <i className="fas fa-bullseye text-blue-500/50"></i>
-                 Threshold: {Math.pow(10, params.logThreshold).toExponential(1)} lx
+                 Eff. Threshold: {effectiveThreshold.toExponential(2)} {isInfrared ? 'W/m²' : 'lx'}
                </span>
                {params.isFlashing && (
                   <span className="flex items-center gap-2 text-emerald-500 animate-pulse">

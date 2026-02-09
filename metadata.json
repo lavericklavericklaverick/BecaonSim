@@ -1,5 +1,5 @@
 {
-  "name": "LED Visibility Simulator -opto",
+  "name": "LED Visibility Simulator -opto1.1",
   "description": "A technical tool for simulating LED visibility in dark conditions, accounting for scotopic vision, beam patterns, and atmospheric attenuation.",
   "requestFramePermissions": []
 }

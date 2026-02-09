@@ -1,3 +1,4 @@
+
 import React, { useRef, useEffect, useMemo, useState } from 'react';
 import { scaleSequential, interpolateMagma, rgb } from 'd3';
 import { GridData, Point } from '../types';
@@ -19,10 +20,16 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
   
   const [pulse, setPulse] = useState(1);
 
+  // Dynamic Color Scale
   const colorScale = useMemo(() => {
-    // Clamp is essential to ensure values below the domain don't return undefined/black colors inappropriately
-    return scaleSequential(interpolateMagma).domain([-9, 0]).clamp(true);
-  }, []);
+    const logThresh = Math.log10(threshold);
+    const minLog = logThresh - 1.0; 
+    const maxLog = logThresh + 4.0; // 10,000x brighter than threshold saturates to white
+    
+    return scaleSequential(interpolateMagma)
+            .domain([minLog, maxLog])
+            .clamp(true);
+  }, [threshold]);
 
   useEffect(() => {
     if (!isFlashing) {
@@ -63,19 +70,29 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     // 1. Prepare Image Data (Off-screen)
-    // We create a temporary canvas that holds the raw heatmap data pixel-for-pixel
     const imgData = ctx.createImageData(width, height);
+    const logThresh = Math.log10(threshold);
+    const fadeStart = logThresh - 1.0;
+
     for (let i = 0; i < data.length; i++) {
       const val = data[i];
-      // Safely handle zero or negative values for log scale
-      const logVal = val <= 1e-15 ? -15 : Math.log10(val);
-      const color = rgb(colorScale(logVal));
+      // Avoid log(0)
+      const safeVal = val <= 1e-15 ? 1e-15 : val;
+      const logVal = Math.log10(safeVal);
       
+      const c = rgb(colorScale(logVal));
       const pxIdx = i * 4;
-      imgData.data[pxIdx] = color.r;
-      imgData.data[pxIdx + 1] = color.g;
-      imgData.data[pxIdx + 2] = color.b;
-      imgData.data[pxIdx + 3] = 255;
+      
+      let alpha = 255;
+      if (logVal < logThresh) {
+          const t = (logVal - fadeStart) / (logThresh - fadeStart);
+          alpha = Math.max(0, Math.min(255, t * 255));
+      }
+      
+      imgData.data[pxIdx] = c.r;
+      imgData.data[pxIdx + 1] = c.g;
+      imgData.data[pxIdx + 2] = c.b;
+      imgData.data[pxIdx + 3] = alpha; 
     }
 
     const tempCanvas = document.createElement('canvas');
@@ -85,173 +102,150 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
 
     // 2. Draw Image with View Transformation
     ctx.save();
-    
-    // Clip to drawing area
     ctx.beginPath();
     ctx.rect(marginLeft, marginTop, drawWidth, drawHeight);
     ctx.clip();
-
-    // Move origin to top-left of drawing area
     ctx.translate(marginLeft, marginTop);
-
-    // Explicitly disable smoothing for crisp grid rendering if resolution is low
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = true;
 
     if (viewType === 'side') {
-        // Side View (Transposed):
-        // Grid Data: Cols = Distance (Y), Rows = Height (X)
-        // We want Screen X = Distance, Screen Y = Height
-        // The grid data index mapping inherently matches this if we transpose (swap X/Y).
-        // Transform: x' = y, y' = x
+        // Side View: x' = y, y' = x
         ctx.transform(0, 1, 1, 0, 0, 0); 
-        
-        // Scale to fit: 
-        // Transformed width is 'height' (number of rows), transformed height is 'width' (number of cols)
         ctx.scale(drawWidth / height, drawHeight / width);
         ctx.drawImage(tempCanvas, 0, 0);
 
     } else {
-        // Top View (Standard):
-        // Grid Data: Cols = Lateral (X), Rows = Distance (Y)
-        // Image Row 0 is minY (Distance 0). Image Row H is maxY (Distance Max).
-        // We want Distance 0 at the BOTTOM of the screen.
-        // So we need to flip the Y axis.
-        
-        // Translate to bottom of draw area
+        // Top View:
         ctx.translate(0, drawHeight);
-        // Scale Y by -1 to flip upwards
         ctx.scale(drawWidth / width, -drawHeight / height);
         ctx.drawImage(tempCanvas, 0, 0);
     }
     ctx.restore();
 
     // 3. Coordinate Mapping Function
-    // Maps World Coordinates (Grid Units) to Canvas Coordinates (Pixels) relative to full canvas
-    // This MUST match the transformation logic above.
     const mapToCanvas = (gx: number, gy: number) => {
         let sx, sy;
         if (viewType === 'side') {
-             // Side View:
-             // gx = Height (World X/Z), gy = Distance (World Y)
-             
-             // Screen X = Distance (0 to Max)
+             // Side View: gx=Height(X), gy=Dist(Y) -> ScreenX=Dist, ScreenY=Height
              sx = marginLeft + ((gy - minY) / (maxY - minY)) * drawWidth;
-             
-             // Screen Y = Height (Min to Max). 
-             // Note: In GridData, minX is index 0. In Side view transform, index 0 is at top (0).
-             // So Height increases DOWNWARDS in the canvas image draw.
              sy = marginTop + ((gx - minX) / (maxX - minX)) * drawHeight;
-
         } else {
-             // Top View:
-             // gx = Lateral (World X), gy = Distance (World Y)
-             
-             // Screen X = Lateral
+             // Top View: gx=Lat(X), gy=Dist(Y) -> ScreenX=Lat, ScreenY=Dist(Inverted)
              sx = marginLeft + ((gx - minX) / (maxX - minX)) * drawWidth;
-             
-             // Screen Y = Distance (Inverted)
-             // We flipped the image so minY is at bottom.
              sy = marginTop + drawHeight - ((gy - minY) / (maxY - minY)) * drawHeight;
         }
         return { x: sx, y: sy };
     };
 
-    const gridStep = 100;
-    const labelStep = 500;
+    // --- ADAPTIVE GRID CALCULATION ---
+    const xRange = maxX - minX;
+    const yRange = maxY - minY;
+    const maxRange = Math.max(xRange, yRange);
+
+    const calculateStep = (range: number) => {
+        if (range <= 1e-6) return 100;
+        const targetTicks = 10; // Aim for ~10 ticks
+        const rawStep = range / targetTicks;
+        const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
+        const residual = rawStep / magnitude;
+        
+        if (residual > 5) return 10 * magnitude;
+        if (residual > 2) return 5 * magnitude;
+        if (residual > 1) return 2 * magnitude;
+        return magnitude;
+    };
+
+    const gridStep = calculateStep(maxRange);
 
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.setLineDash([4, 6]);
     ctx.lineWidth = 1;
     
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.font = 'bold 16px monospace';
+    ctx.font = 'bold 12px monospace';
     ctx.shadowColor = 'rgba(0,0,0,0.8)';
     ctx.shadowBlur = 4;
 
+    const formatTick = (val: number) => {
+        if (Math.abs(val) >= 10000) return `${val/1000}k`;
+        return `${val}`;
+    };
+
     // DRAW GRID & TICKS
     
-    // Vertical Lines (Constant World X / Lateral / Height)
-    for (let x = Math.ceil(minX / gridStep) * gridStep; x <= maxX; x += gridStep) {
+    // Vertical Lines (Iterating World X)
+    const startX = Math.ceil(minX / gridStep) * gridStep;
+    for (let x = startX; x <= maxX + (gridStep * 0.001); x += gridStep) {
+      const val = Math.round(x * 1000) / 1000;
+      if (val < minX || val > maxX) continue;
+
       if (viewType === 'side') {
-          // Side View: X is Height (Vertical axis)
-          const p1 = mapToCanvas(x, minY); // Height x, Dist min
-          const p2 = mapToCanvas(x, maxY); // Height x, Dist max
+          // In Side view, X axis is Height (Vertical on screen)
+          const p1 = mapToCanvas(val, minY); 
+          const p2 = mapToCanvas(val, maxY); 
           
           ctx.beginPath();
           ctx.moveTo(marginLeft, p1.y); 
           ctx.lineTo(marginLeft + drawWidth, p2.y);
           ctx.stroke();
 
-          // Label on Left
-          if (Math.abs(x % labelStep) < 1) {
-             if (x !== 0 || minX < 0) { 
-                 ctx.textAlign = 'right';
-                 ctx.textBaseline = 'middle';
-                 ctx.fillText(`${x}m`, marginLeft - 15, p1.y);
-             }
+          if (Math.abs(val) > 1e-10 || minX < 0) { 
+             ctx.textAlign = 'right';
+             ctx.textBaseline = 'middle';
+             ctx.fillText(`${formatTick(val)}m`, marginLeft - 10, p1.y);
           }
 
       } else {
-          // Top View: X is Lateral (Horizontal axis)
-          // Vertical lines
-          const p1 = mapToCanvas(x, minY);
-          const p2 = mapToCanvas(x, maxY);
+          // In Top view, X axis is Lateral (Horizontal on screen)
+          const p1 = mapToCanvas(val, minY);
+          const p2 = mapToCanvas(val, maxY);
           
           ctx.beginPath();
           ctx.moveTo(p1.x, marginTop);
           ctx.lineTo(p2.x, marginTop + drawHeight);
           ctx.stroke();
 
-          // Label on Bottom
-          if (Math.abs(x % labelStep) < 1) {
-              if (Math.abs(x) > 1) {
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'top';
-                ctx.fillText(`${x}m`, p1.x, marginTop + drawHeight + 15);
-              }
-          }
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillText(`${formatTick(val)}m`, p1.x, marginTop + drawHeight + 10);
       }
     }
 
-    // Iterate World Y (Distance)
-    for (let y = Math.ceil(minY / gridStep) * gridStep; y <= maxY; y += gridStep) {
+    // Horizontal Lines (Iterating World Y)
+    const startY = Math.ceil(minY / gridStep) * gridStep;
+    for (let y = startY; y <= maxY + (gridStep * 0.001); y += gridStep) {
+        const val = Math.round(y * 1000) / 1000;
+        if (val < minY || val > maxY) continue;
+
         if (viewType === 'side') {
-            // Side View: Y is Distance (Horizontal axis)
-            // Vertical lines
-            const p1 = mapToCanvas(minX, y);
-            const p2 = mapToCanvas(maxX, y);
+            // In Side view, Y axis is Distance (Horizontal on screen)
+            const p1 = mapToCanvas(minX, val);
+            const p2 = mapToCanvas(maxX, val);
 
             ctx.beginPath();
             ctx.moveTo(p1.x, marginTop);
             ctx.lineTo(p2.x, marginTop + drawHeight);
             ctx.stroke();
 
-            // Label on Bottom
-            if (Math.abs(y % labelStep) < 1) {
-                if (y > minY) {
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'top';
-                    ctx.fillText(`${y}m`, p1.x, marginTop + drawHeight + 15);
-                }
+            if (val > minY) { 
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'top';
+                ctx.fillText(`${formatTick(val)}m`, p1.x, marginTop + drawHeight + 10);
             }
         } else {
-            // Top View: Y is Distance (Vertical axis)
-            // Horizontal lines
-            const p1 = mapToCanvas(minX, y);
-            const p2 = mapToCanvas(maxX, y);
+            // In Top view, Y axis is Distance (Vertical on screen)
+            const p1 = mapToCanvas(minX, val);
+            const p2 = mapToCanvas(maxX, val);
 
             ctx.beginPath();
             ctx.moveTo(marginLeft, p1.y);
             ctx.lineTo(marginLeft + drawWidth, p2.y);
             ctx.stroke();
             
-            // Label on Left
-            if (Math.abs(y % labelStep) < 1) {
-                if (y > minY) {
-                    ctx.textAlign = 'right';
-                    ctx.textBaseline = 'middle';
-                    ctx.fillText(`${y}m`, marginLeft - 15, p1.y);
-                }
+            if (val > minY) {
+                ctx.textAlign = 'right';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(`${formatTick(val)}m`, marginLeft - 10, p1.y);
             }
         }
     }
@@ -267,7 +261,7 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
 
     // Draw Target Box
     if (targetBox) {
-        ctx.strokeStyle = 'rgba(250, 204, 21, 0.6)'; // Yellow
+        ctx.strokeStyle = 'rgba(250, 204, 21, 0.6)'; 
         ctx.lineWidth = 3;
         ctx.setLineDash([10, 10]);
         
@@ -287,7 +281,6 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
         ctx.closePath();
         ctx.stroke();
         
-        // Label
         ctx.fillStyle = 'rgba(250, 204, 21, 0.8)';
         ctx.font = 'bold 16px sans-serif';
         ctx.textAlign = 'left';
@@ -297,11 +290,10 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
         ctx.setLineDash([]);
     }
 
-    // Draw Contours
+    // Draw Contours (Threshold)
     ctx.strokeStyle = isFlashing ? '#10b981' : '#4ade80';
-    ctx.lineWidth = isFlashing ? 4 : 3;
-    ctx.shadowBlur = isFlashing ? 12 : 8;
-    ctx.shadowColor = isFlashing ? 'rgba(16, 185, 129, 0.4)' : 'rgba(0,0,0,0.9)';
+    ctx.lineWidth = isFlashing ? 3 : 2;
+    ctx.shadowBlur = 0; 
     
     ctx.beginPath();
     contourLines.forEach((path) => {
@@ -314,7 +306,6 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
       }
     });
     ctx.stroke();
-    ctx.shadowBlur = 0;
 
     // Draw Center Line
     ctx.strokeStyle = 'rgba(255,255,255,0.4)';
@@ -328,32 +319,28 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
 
     // Draw Arrows (LED Direction)
     const center = mapToCanvas(0, 0);
-    const scaleFactor = Math.min(drawWidth, drawHeight) * 0.15 * (isFlashing ? pulse : 1);
-
-    ctx.shadowBlur = isFlashing ? 15 : 10;
-    ctx.shadowColor = isFlashing ? 'rgba(6, 182, 212, 0.7)' : 'rgba(0, 255, 255, 0.5)';
+    
     ctx.strokeStyle = isFlashing ? '#22d3ee' : '#06b6d4';
-    ctx.lineWidth = isFlashing ? 3 : 2;
+    ctx.lineWidth = 2;
     ctx.lineCap = 'round';
+    ctx.shadowBlur = 0; 
 
     ledConfig.forEach(({ h, v }) => {
-      // 3D Direction Vector
-      const dx = Math.sin(h) * Math.cos(v); // Lateral
-      const dy = Math.cos(h) * Math.cos(v); // Forward
-      const dz = Math.sin(v);               // Up
+      const dx = Math.sin(h) * Math.cos(v); 
+      const dy = Math.cos(h) * Math.cos(v); 
+      const dz = Math.sin(v);               
 
       let tip;
-
       if (viewType === 'side') {
         const worldLen = (maxY - minY) * 0.1;
-        const wx = dz * worldLen; // Height
-        const wy = dy * worldLen; // Distance
+        const wx = dz * worldLen; 
+        const wy = dy * worldLen; 
         tip = mapToCanvas(wx, wy);
 
       } else {
         const worldLen = (maxY - minY) * 0.1;
-        const wx = dx * worldLen; // Lateral
-        const wy = dy * worldLen; // Distance
+        const wx = dx * worldLen; 
+        const wy = dy * worldLen; 
         tip = mapToCanvas(wx, wy);
       }
       
@@ -370,10 +357,9 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
 
     ctx.restore(); // End clipping
 
-    // Draw Title/Axis Labels (Outside clip)
+    // Labels
     ctx.save();
     
-    // View Title (Top Left)
     if (title) {
         ctx.fillStyle = 'white';
         ctx.font = 'bold 20px sans-serif';
@@ -382,19 +368,16 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
         ctx.fillText(title, 20, 15);
     }
 
-    // Axis Labels
     ctx.fillStyle = 'rgba(255,255,255,0.5)';
     ctx.font = '14px sans-serif';
     
     const xLabel = viewType === 'side' ? 'DISTANCE (Y)' : 'LATERAL (X)';
     const yLabel = viewType === 'side' ? 'HEIGHT (Z)' : 'DISTANCE (Y)';
     
-    // Bottom Axis Label
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
     ctx.fillText(xLabel, marginLeft + drawWidth / 2, canvas.height - 15);
 
-    // Left Axis Label (Rotated)
     ctx.translate(20, marginTop + drawHeight / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.textAlign = 'center';
@@ -404,8 +387,6 @@ const Heatmap: React.FC<HeatmapProps> = ({ grid, threshold, ledConfig, isFlashin
     ctx.restore();
 
   }, [data, threshold, colorScale, width, height, minX, maxX, minY, maxY, ledConfig, isFlashing, pulse, contourLines, viewType, title, targetBox]);
-
-  const displayThreshold = isFlashing ? threshold / 8 : threshold;
 
   return (
     <div className="relative w-full aspect-square lg:aspect-video bg-black rounded-3xl overflow-hidden shadow-2xl border border-white/5">
