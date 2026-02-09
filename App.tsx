@@ -155,8 +155,8 @@ const App: React.FC = () => {
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [optResults, setOptResults] = useState<OptResult[]>([]);
   const [showTarget, setShowTarget] = useState(false);
-  const [autoScale, setAutoScale] = useState(false);
-  const [showCones, setShowCones] = useState(true);
+  const [autoScale, setAutoScale] = useState(true);
+  const [showCones, setShowCones] = useState(false);
 
   const [topGrid, setTopGrid] = useState<GridData | null>(null);
   const [sideGrid, setSideGrid] = useState<GridData | null>(null);
@@ -669,13 +669,13 @@ const App: React.FC = () => {
                 <div className="bg-white/5 rounded-xl p-3 mb-2">
                     <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest block mb-4">Plan (Horizontal)</span>
                     <ControlSlider label="LED Columns" val={params.ledCount} min={1} max={8} step={1} onChange={v => updateParam('ledCount', v)} showMarkers={true} />
-                    <ControlSlider label="Plan Spread" val={params.spreadAngle} unit="°" min={0} max={180} step={1} onChange={v => updateParam('spreadAngle', v)} />
+                    <ControlSlider label="Plan Spread" val={params.spreadAngle} unit="°" min={0} max={90} step={1} onChange={v => updateParam('spreadAngle', v)} />
                 </div>
                 
                 <div className="bg-white/5 rounded-xl p-3">
                     <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest block mb-4">Elevation (Vertical)</span>
                     <ControlSlider label="LED Rows" val={params.rowCount} min={1} max={8} step={1} onChange={v => updateParam('rowCount', v)} showMarkers={true} />
-                    <ControlSlider label="Elev Spread" val={params.verticalSpreadAngle} unit="°" min={0} max={180} step={1} onChange={v => updateParam('verticalSpreadAngle', v)} />
+                    <ControlSlider label="Elev Spread" val={params.verticalSpreadAngle} unit="°" min={0} max={90} step={1} onChange={v => updateParam('verticalSpreadAngle', v)} />
                 </div>
               </div>
             </CollapsibleSection>
